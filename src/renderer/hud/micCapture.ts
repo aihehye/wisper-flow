@@ -1,0 +1,505 @@
+import { RECORDING_SAMPLE_RATE } from '@shared/defaults';
+import type { AudioDeviceOption } from '@shared/types';
+
+export interface MicCaptureResult {
+  wavBuffer: Uint8Array;
+  durationMs: number;
+  speechDurationMs: number;
+  peakLevel: number;
+  deviceLabel: string;
+}
+
+export interface MicCaptureSession {
+  stop: () => Promise<MicCaptureResult>;
+  cancel: () => Promise<void>;
+}
+
+const WORKLET_PROCESSOR_CODE = `
+class WisperPcmProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const input = inputs[0];
+    if (input && input[0] && input[0].length > 0) {
+      const channel = input[0];
+      const copy = new Float32Array(channel.length);
+      copy.set(channel);
+      this.port.postMessage(copy, [copy.buffer]);
+    }
+    return true;
+  }
+}
+registerProcessor('wisper-pcm-processor', WisperPcmProcessor);
+`;
+
+const WHISPER_GAIN_MULTIPLIER = 3.2;
+const SPEECH_RMS_THRESHOLD = 0.014;
+const BAR_COUNT = 10;
+
+export async function enumerateAudioInputs(): Promise<AudioDeviceOption[]> {
+  if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) {
+    return [{ id: 'default', label: 'System Default' }];
+  }
+
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices.filter((d) => d.kind === 'audioinput');
+    const seen = new Set<string>();
+    const options: AudioDeviceOption[] = [];
+
+    for (let i = 0; i < inputs.length; i += 1) {
+      const dev = inputs[i];
+      const id = dev.deviceId || 'default';
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const label =
+        dev.label?.trim() ||
+        (id === 'default' ? 'System Default' : `Microphone ${options.length + 1}`);
+      options.push({ id, label });
+    }
+
+    if (!options.some((d) => d.id === 'default')) {
+      options.unshift({ id: 'default', label: 'System Default' });
+    }
+    return options;
+  } catch {
+    return [{ id: 'default', label: 'System Default' }];
+  }
+}
+
+function createAudioConstraints(deviceId?: string): MediaStreamConstraints {
+  const audio: MediaTrackConstraints = {
+    channelCount: 1,
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  };
+  if (deviceId && deviceId !== 'default') {
+    audio.deviceId = { exact: deviceId };
+  }
+  return { audio, video: false };
+}
+
+async function openMicStream(deviceId?: string): Promise<MediaStream> {
+  try {
+    return await navigator.mediaDevices.getUserMedia(createAudioConstraints(deviceId));
+  } catch {
+    // Fallback to default device if exact deviceId is temporarily unavailable
+    return navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
+  }
+}
+
+function softBoostSample(sample: number, boost: boolean): number {
+  if (!boost) {
+    return Math.max(-1, Math.min(1, sample));
+  }
+  const amplified = sample * WHISPER_GAIN_MULTIPLIER;
+  return Math.tanh(amplified);
+}
+
+function resampleFloat32(
+  chunks: Float32Array[],
+  inputSampleRate: number,
+  targetSampleRate: number,
+  whisperMode: boolean,
+): { pcm: Float32Array; peak: number; speechDurationMs: number } {
+  let totalSamples = 0;
+  for (const c of chunks) {
+    totalSamples += c.length;
+  }
+
+  if (totalSamples === 0) {
+    return { pcm: new Float32Array(0), peak: 0, speechDurationMs: 0 };
+  }
+
+  const merged = new Float32Array(totalSamples);
+  let offset = 0;
+  let peak = 0;
+  let speechFrames = 0;
+  const frameSize = Math.max(1, Math.round(inputSampleRate * 0.02)); // 20 ms window
+
+  for (const c of chunks) {
+    for (let i = 0; i < c.length; i += 1) {
+      const s = softBoostSample(c[i], whisperMode);
+      merged[offset + i] = s;
+      const abs = Math.abs(s);
+      if (abs > peak) peak = abs;
+    }
+    offset += c.length;
+  }
+
+  for (let start = 0; start < merged.length; start += frameSize) {
+    const end = Math.min(merged.length, start + frameSize);
+    let sumSq = 0;
+    for (let i = start; i < end; i += 1) {
+      sumSq += merged[i] * merged[i];
+    }
+    const rms = Math.sqrt(sumSq / Math.max(1, end - start));
+    if (rms >= SPEECH_RMS_THRESHOLD) {
+      speechFrames += 1;
+    }
+  }
+  const speechDurationMs = speechFrames * 20;
+
+  if (inputSampleRate === targetSampleRate) {
+    return { pcm: merged, peak, speechDurationMs };
+  }
+
+  const ratio = inputSampleRate / targetSampleRate;
+  const outLength = Math.max(1, Math.floor(merged.length / ratio));
+  const out = new Float32Array(outLength);
+
+  if (ratio > 1) {
+    // Anti-aliased box-averaging + linear interpolation for clean downsampling
+    for (let i = 0; i < outLength; i += 1) {
+      const srcStart = i * ratio;
+      const srcEnd = Math.min(merged.length, (i + 1) * ratio);
+      const startIdx = Math.floor(srcStart);
+      const endIdx = Math.min(merged.length - 1, Math.ceil(srcEnd));
+      let sum = 0;
+      let count = 0;
+      for (let j = startIdx; j <= endIdx; j += 1) {
+        sum += merged[j];
+        count += 1;
+      }
+      out[i] = count > 0 ? sum / count : 0;
+    }
+  } else {
+    for (let i = 0; i < outLength; i += 1) {
+      const pos = i * ratio;
+      const idx = Math.floor(pos);
+      const frac = pos - idx;
+      const next = Math.min(merged.length - 1, idx + 1);
+      out[i] = merged[idx] * (1 - frac) + merged[next] * frac;
+    }
+  }
+
+  return { pcm: out, peak, speechDurationMs };
+}
+
+export function encodeWavInt16(samples: Float32Array, sampleRate: number): Uint8Array {
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
+  const blockAlign = (numChannels * bitsPerSample) / 8;
+  const dataSize = samples.length * 2;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  const writeStr = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i += 1) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true); // PCM chunk size
+  view.setUint16(20, 1, true); // PCM format
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeStr(36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  let writeOffset = 44;
+  for (let i = 0; i < samples.length; i += 1) {
+    const clamped = Math.max(-1, Math.min(1, samples[i]));
+    const int16 = clamped < 0 ? Math.round(clamped * 0x8000) : Math.round(clamped * 0x7fff);
+    view.setInt16(writeOffset, int16, true);
+    writeOffset += 2;
+  }
+
+  return new Uint8Array(buffer);
+}
+
+function computeCenterSymmetricBars(
+  analyser: AnalyserNode,
+  freqData: Uint8Array<ArrayBuffer>,
+  timeData: Uint8Array<ArrayBuffer>,
+  prevBars: number[],
+  whisperMode: boolean,
+): { bars: number[]; rms: number } {
+  analyser.getByteFrequencyData(freqData);
+  analyser.getByteTimeDomainData(timeData);
+
+  let sumSq = 0;
+  for (let i = 0; i < timeData.length; i += 1) {
+    const norm = (timeData[i] - 128) / 128;
+    sumSq += norm * norm;
+  }
+  const rawRms = Math.sqrt(sumSq / Math.max(1, timeData.length));
+  const boostedRms = Math.min(1, rawRms * (whisperMode ? 5.2 : 3.2));
+
+  // 5 half-spectrum bands mirrored from center outward: [b4, b3, b2, b1, b0, b0, b1, b2, b3, b4]
+  const halfCount = BAR_COUNT / 2;
+  const binRanges: Array<[number, number]> = [
+    [1, 3],
+    [3, 7],
+    [7, 14],
+    [14, 26],
+    [26, 46],
+  ];
+
+  const halfValues: number[] = [];
+  for (let band = 0; band < halfCount; band += 1) {
+    const [start, end] = binRanges[band];
+    let total = 0;
+    let count = 0;
+    for (let b = start; b < Math.min(end, freqData.length); b += 1) {
+      total += freqData[b] / 255;
+      count += 1;
+    }
+    const bandEnergy = count > 0 ? total / count : 0;
+    const gain = whisperMode ? 1.85 : 1.25;
+    const combined = Math.min(1, Math.max(0, bandEnergy * gain * 0.72 + boostedRms * 0.45));
+    halfValues.push(combined);
+  }
+
+  const nextBars = new Array<number>(BAR_COUNT);
+  for (let i = 0; i < halfCount; i += 1) {
+    const val = halfValues[i];
+    const leftIdx = halfCount - 1 - i;
+    const rightIdx = halfCount + i;
+    const smoothLeft = prevBars[leftIdx] * 0.35 + val * 0.65;
+    const smoothRight = prevBars[rightIdx] * 0.35 + val * 0.65;
+    nextBars[leftIdx] = Math.max(0.04, Math.min(1, smoothLeft));
+    nextBars[rightIdx] = Math.max(0.04, Math.min(1, smoothRight));
+  }
+
+  return { bars: nextBars, rms: boostedRms };
+}
+
+export async function startMicCapture(options: {
+  deviceId?: string;
+  whisperMode?: boolean;
+  onLevels?: (bars: number[]) => void;
+}): Promise<MicCaptureSession> {
+  const whisperMode = Boolean(options.whisperMode);
+  const stream = await openMicStream(options.deviceId);
+  const track = stream.getAudioTracks()[0];
+  const deviceLabel = track?.label || 'Default Microphone';
+
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+  const ctx = new AudioCtx({ sampleRate: RECORDING_SAMPLE_RATE, latencyHint: 'interactive' });
+  if (ctx.state === 'suspended') {
+    await ctx.resume();
+  }
+
+  const source = ctx.createMediaStreamSource(stream);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 256;
+  analyser.smoothingTimeConstant = 0.65;
+
+  const silentGain = ctx.createGain();
+  silentGain.gain.value = 0;
+
+  const chunks: Float32Array[] = [];
+  let workletNode: AudioWorkletNode | null = null;
+  let scriptNode: ScriptProcessorNode | null = null;
+  let blobUrl: string | null = null;
+  let closed = false;
+  const startedAt = performance.now();
+
+  source.connect(analyser);
+
+  let usedWorklet = false;
+  if (ctx.audioWorklet && typeof Blob !== 'undefined' && typeof URL !== 'undefined') {
+    try {
+      const blob = new Blob([WORKLET_PROCESSOR_CODE], { type: 'application/javascript' });
+      blobUrl = URL.createObjectURL(blob);
+      await ctx.audioWorklet.addModule(blobUrl);
+      workletNode = new AudioWorkletNode(ctx, 'wisper-pcm-processor');
+      workletNode.port.onmessage = (ev: MessageEvent<Float32Array>) => {
+        if (!closed && ev.data instanceof Float32Array) {
+          chunks.push(ev.data);
+        }
+      };
+      source.connect(workletNode);
+      workletNode.connect(silentGain);
+      silentGain.connect(ctx.destination);
+      usedWorklet = true;
+    } catch {
+      usedWorklet = false;
+    }
+  }
+
+  if (!usedWorklet) {
+    scriptNode = ctx.createScriptProcessor(2048, 1, 1);
+    scriptNode.onaudioprocess = (ev: AudioProcessingEvent) => {
+      if (closed) return;
+      const input = ev.inputBuffer.getChannelData(0);
+      if (input.length > 0) {
+        chunks.push(new Float32Array(input));
+      }
+    };
+    source.connect(scriptNode);
+    scriptNode.connect(silentGain);
+    silentGain.connect(ctx.destination);
+  }
+
+  const freqData = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
+  const timeData = new Uint8Array(new ArrayBuffer(analyser.fftSize));
+  let currentBars = new Array<number>(BAR_COUNT).fill(0.06);
+  let rafId = 0;
+  let lastEmit = 0;
+
+  const tick = (now: number) => {
+    if (closed) return;
+    if (now - lastEmit >= 28) {
+      lastEmit = now;
+      const { bars } = computeCenterSymmetricBars(
+        analyser,
+        freqData,
+        timeData,
+        currentBars,
+        whisperMode,
+      );
+      currentBars = bars;
+      options.onLevels?.(bars);
+    }
+    rafId = requestAnimationFrame(tick);
+  };
+
+  if (options.onLevels) {
+    rafId = requestAnimationFrame(tick);
+  }
+
+  const teardown = async () => {
+    if (closed) return;
+    closed = true;
+    if (rafId) cancelAnimationFrame(rafId);
+
+    try {
+      source.disconnect();
+    } catch {}
+    try {
+      analyser.disconnect();
+    } catch {}
+    try {
+      workletNode?.disconnect();
+      if (workletNode) workletNode.port.onmessage = null;
+    } catch {}
+    try {
+      scriptNode?.disconnect();
+      if (scriptNode) scriptNode.onaudioprocess = null;
+    } catch {}
+    try {
+      silentGain.disconnect();
+    } catch {}
+
+    for (const t of stream.getTracks()) {
+      try {
+        t.stop();
+      } catch {}
+    }
+
+    if (blobUrl) {
+      URL.revokeObjectURL(blobUrl);
+      blobUrl = null;
+    }
+
+    try {
+      await ctx.close();
+    } catch {}
+  };
+
+  return {
+    stop: async () => {
+      const durationMs = Math.max(0, Math.round(performance.now() - startedAt));
+      const actualSampleRate = ctx.sampleRate || RECORDING_SAMPLE_RATE;
+      await teardown();
+      const { pcm, peak, speechDurationMs } = resampleFloat32(
+        chunks,
+        actualSampleRate,
+        RECORDING_SAMPLE_RATE,
+        whisperMode,
+      );
+      const wavBuffer = encodeWavInt16(pcm, RECORDING_SAMPLE_RATE);
+      return {
+        wavBuffer,
+        durationMs,
+        speechDurationMs,
+        peakLevel: peak,
+        deviceLabel,
+      };
+    },
+    cancel: async () => {
+      chunks.length = 0;
+      await teardown();
+    },
+  };
+}
+
+export async function startMicLevelMonitor(
+  deviceId: string | undefined,
+  whisperMode: boolean,
+  onLevel: (level: number, peakZero: boolean) => void,
+): Promise<() => Promise<void>> {
+  const stream = await openMicStream(deviceId);
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+  const ctx = new AudioCtx({ latencyHint: 'interactive' });
+  if (ctx.state === 'suspended') {
+    await ctx.resume();
+  }
+
+  const source = ctx.createMediaStreamSource(stream);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 256;
+  source.connect(analyser);
+
+  const freqData = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
+  const timeData = new Uint8Array(new ArrayBuffer(analyser.fftSize));
+  let bars = new Array<number>(BAR_COUNT).fill(0);
+  let closed = false;
+  let rafId = 0;
+  let seenNonZero = false;
+
+  const loop = () => {
+    if (closed) return;
+    const { bars: nextBars, rms } = computeCenterSymmetricBars(
+      analyser,
+      freqData,
+      timeData,
+      bars,
+      whisperMode,
+    );
+    bars = nextBars;
+    if (rms > 0.001) seenNonZero = true;
+    onLevel(rms, !seenNonZero);
+    rafId = requestAnimationFrame(loop);
+  };
+  rafId = requestAnimationFrame(loop);
+
+  return async () => {
+    if (closed) return;
+    closed = true;
+    if (rafId) cancelAnimationFrame(rafId);
+    try {
+      source.disconnect();
+      analyser.disconnect();
+    } catch {}
+    for (const t of stream.getTracks()) {
+      try {
+        t.stop();
+      } catch {}
+    }
+    try {
+      await ctx.close();
+    } catch {}
+  };
+}

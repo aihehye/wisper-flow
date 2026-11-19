@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Wisper Flow Local
+GenericName=Local Voice Dictation
+Comment=100% local voice-to-text dictation powered by Rumble-2-Flash on GPU
+Exec=/usr/bin/wisper-flow %U
+Icon=wisper-flow
+Terminal=false
+Type=Application
+Categories=Utility;AudioVideo;Accessibility;
+StartupWMClass=wisper-flow
+Keywords=voice;dictation;speech;whisper;asr;omarchy;

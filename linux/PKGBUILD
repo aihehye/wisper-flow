@@ -1,0 +1,42 @@
+pkgname=wisper-flow-local
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="100% local Wispr Flow clone with Rumble-2-Flash GPU ASR and native Omarchy/Hyprland integration"
+arch=('x86_64')
+url="https://github.com/local/wisper-flow"
+license=('Apache-2.0')
+depends=('wl-clipboard' 'pipewire' 'gtk3' 'nss' 'alsa-lib' 'vulkan-icd-loader')
+optdepends=(
+  'hyprland: Native Hyprland / Omarchy HUD window rules and sendshortcut auto-paste'
+  'wtype: Direct typing and Sway/wlroots auto-paste fallback'
+  'ydotool: GNOME/KDE Wayland auto-paste fallback'
+  'xdotool: X11 auto-paste fallback'
+  'xclip: X11 clipboard fallback'
+  'libnotify: Desktop fallback notifications'
+  'socat: Fallback socket trigger if native binary missing'
+)
+makedepends=('nodejs' 'npm' 'gcc')
+source=()
+
+build() {
+  cd "${startdir}/.."
+  npm ci
+  npm run generate:assets
+  npm run build
+  gcc -O2 -Wall -Wextra -o linux/wisper-flow-ctl linux/wisper-flow-ctl.c
+}
+
+package() {
+  cd "${startdir}/.."
+  install -dm755 "${pkgdir}/usr/lib/wisper-flow"
+  cp -a dist package.json assets "${pkgdir}/usr/lib/wisper-flow/"
+  if [ -d node_modules ]; then
+    cp -a node_modules "${pkgdir}/usr/lib/wisper-flow/"
+  fi
+
+  install -Dm755 linux/wisper-flow.sh "${pkgdir}/usr/bin/wisper-flow"
+  install -Dm755 linux/wisper-flow-ctl "${pkgdir}/usr/bin/wisper-flow-ctl"
+  install -Dm644 linux/wisper-flow.desktop "${pkgdir}/usr/share/applications/wisper-flow.desktop"
+  install -Dm644 assets/icons/app.png "${pkgdir}/usr/share/icons/hicolor/256x256/apps/wisper-flow.png"
+  install -Dm644 linux/wisper-flow.service "${pkgdir}/usr/lib/systemd/user/wisper-flow.service"
+}

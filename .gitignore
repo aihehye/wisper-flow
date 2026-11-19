@@ -1,0 +1,15 @@
+node_modules/
+dist/
+out/
+release/
+resources/models/
+resources/runtime/
+native/win-helper/*.exe
+demo-video/
+.agents/
+.taste-skill/
+skills-lock.json
+*.sqlite
+*.db
+.DS_Store
+Thumbs.db

@@ -1,0 +1,82 @@
+{
+  "name": "wisper-flow",
+  "version": "1.0.0",
+  "description": "100% local, zero-LLM Wispr Flow clone powered by Rumble-2-Flash on local GPU with full Windows & Linux/Omarchy support",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "dev": "vite build && npm run build:main && electron .",
+    "build": "npm run build:renderer && npm run build:main",
+    "build:renderer": "vite build",
+    "build:main": "node scripts/build-main.mjs",
+    "build:win-helper": "node scripts/build-win-helper.mjs",
+    "dist:win": "npm run build:win-helper && npm run build && electron-builder --win nsis",
+    "generate:assets": "node scripts/generate-assets.mjs",
+    "download:model": "node scripts/download-model.mjs",
+    "smoke:gpu": "node scripts/smoke-test-gpu.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "lucide-react": "^0.511.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zustand": "^5.0.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.4.1",
+    "electron": "^36.3.2",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.25.4",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  },
+  "build": {
+    "appId": "com.wisperflow.local",
+    "productName": "Wisper Flow Local",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "native/win-helper/wisper-win-helper.exe",
+        "to": "win-helper/wisper-win-helper.exe"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icons/app.ico",
+      "extraResources": [
+        {
+          "from": "resources/runtime/llama-server",
+          "to": "resources/runtime/llama-server"
+        },
+        {
+          "from": "resources/models/rumble-2-flash",
+          "to": "resources/models/rumble-2-flash"
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true
+    },
+    "linux": {
+      "target": [
+        "dir"
+      ],
+      "category": "Utility",
+      "executableName": "wisper-flow"
+    }
+  }
+}

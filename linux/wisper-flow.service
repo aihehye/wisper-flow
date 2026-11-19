@@ -1,0 +1,13 @@
+[Unit]
+Description=Wisper Flow Local Dictation Daemon
+PartOf=graphical-session.target
+After=graphical-session.target pipewire.service wireplumber.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wisper-flow --hidden
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
