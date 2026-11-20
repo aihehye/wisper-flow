@@ -110,7 +110,7 @@ describe('runTextPipeline', () => {
 
   it('matches full-utterance exact snippets ignoring punctuation/case and skips cleanup', () => {
     const snippets = [
-      makeSnippet('s1', 'my calendly', 'https://calendly.com/maniteja/30min\nSee you then!', {
+      makeSnippet('s1', 'my calendly', 'https://calendly.com/hemanth/30min\nSee you then!', {
         exactOnly: true,
       }),
       makeSnippet('s2', 'disabled trigger', 'SHOULD NOT MATCH', { enabled: false }),
@@ -132,11 +132,11 @@ describe('runTextPipeline', () => {
     assert.deepEqual(res.matchedDictionaryIds, []);
     assert.equal(
       res.afterExactSnippet,
-      'https://calendly.com/maniteja/30min\nSee you then!'
+      'https://calendly.com/hemanth/30min\nSee you then!'
     );
     assert.equal(
       res.finalOutput,
-      'https://calendly.com/maniteja/30min\nSee you then!'
+      'https://calendly.com/hemanth/30min\nSee you then!'
     );
 
     const disabledRes = runTextPipeline('disabled trigger', {
@@ -158,7 +158,7 @@ describe('runTextPipeline', () => {
       makeDict('d-hint', 'Kubernetes', null), // hint only, never replaces
     ];
     const snippets = [
-      makeSnippet('s-inline', 'sig', 'Best,\nManiteja', { exactOnly: false }),
+      makeSnippet('s-inline', 'sig', 'Best,\nHemanth', { exactOnly: false }),
       makeSnippet('s-exact', 'exact only', 'SHOULD_NOT_INLINE', { exactOnly: true }),
     ];
 
@@ -174,7 +174,7 @@ describe('runTextPipeline', () => {
 
     assert.equal(
       res.afterDictionaryAndInlineSnippets,
-      "I able to go to NYC and NY, but I can't and can’t skip coffee shop, cannot, foo_can, Kubernetes, exact only, Best,\nManiteja."
+      "I able to go to NYC and NY, but I can't and can’t skip coffee shop, cannot, foo_can, Kubernetes, exact only, Best,\nHemanth."
     );
     assert.deepEqual(new Set(res.matchedDictionaryIds), new Set(['d-short', 'd-long', 'd-can', 'd-cafe']));
     assert.deepEqual(res.matchedSnippetIds, ['s-inline']);

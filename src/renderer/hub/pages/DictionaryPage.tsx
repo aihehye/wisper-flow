@@ -531,7 +531,7 @@ export const DictionaryPage: React.FC = () => {
           className="input"
           style={{ flex: 1, minWidth: 180 }}
           placeholder={
-            tab === 'hints' ? 'Add term (e.g. Omarchy, Hyprland, Maniteja)…' : 'Spoken phrase…'
+            tab === 'hints' ? 'Add term (e.g. Omarchy, Hyprland, Hemanth)…' : 'Spoken phrase…'
           }
           value={phraseInput}
           onChange={(e) => setPhraseInput(e.target.value)}
