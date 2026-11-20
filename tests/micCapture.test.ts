@@ -35,6 +35,7 @@ const { createDefaultSettings } = await import('../src/shared/defaults');
 const {
   RollingPreRollBuffer,
   computeGentleWhisperGain,
+  createAudioConstraints,
   resampleFloat32,
   PRE_ROLL_MS,
   TAIL_DRAIN_MS,
@@ -43,9 +44,36 @@ const {
   WHISPER_TARGET_PEAK,
 } = await import('../src/renderer/hud/micCapture');
 
-test('createDefaultSettings sets whisperModeBoost to false', () => {
+test('createDefaultSettings sets whisperModeBoost to false and micProfile to quiet', () => {
   assert.equal(createDefaultSettings('win32').whisperModeBoost, false);
   assert.equal(createDefaultSettings('linux').whisperModeBoost, false);
+  assert.equal(createDefaultSettings('win32').micProfile, 'quiet');
+  assert.equal(createDefaultSettings('linux').micProfile, 'quiet');
+});
+
+test('createAudioConstraints configures echoCancellation/noiseSuppression by micProfile', () => {
+  const quiet = createAudioConstraints('default', 'quiet');
+  assert.deepEqual(quiet, {
+    audio: {
+      channelCount: 1,
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: true,
+    },
+    video: false,
+  });
+
+  const noisy = createAudioConstraints('usb-mic-1', 'noisy');
+  assert.deepEqual(noisy, {
+    audio: {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      deviceId: { exact: 'usb-mic-1' },
+    },
+    video: false,
+  });
 });
 
 test('PRE_ROLL_MS and TAIL_DRAIN_MS are within expected ranges', () => {

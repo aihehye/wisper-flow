@@ -405,6 +405,29 @@ body,
   background: rgba(255, 255, 255, 0.24);
 }
 
+.hud-mode-chip {
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.9);
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background 0.1s ease, border-color 0.1s ease;
+}
+
+.hud-mode-chip:hover {
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.36);
+}
+
+.hud-mode-chip.noisy {
+  border-color: rgba(223, 192, 123, 0.5);
+  color: #dfc07b;
+}
+
 @keyframes hudPopoverIn {
   from {
     opacity: 0;

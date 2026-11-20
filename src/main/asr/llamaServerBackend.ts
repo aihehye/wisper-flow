@@ -6,7 +6,15 @@ import { promisify } from 'node:util';
 import type { GpuDeviceInfo, ModelStatus } from '../../shared/types';
 import type { AsrBackend, TokenUsage, TranscribeRequest, TranscribeResult } from './types';
 import { getLlamaServerBinaryPath, getModelPaths } from './modelManager';
-import { encodePcm16MonoWav, splitWavIntoChunks, trimSilenceWav } from './wavUtils';
+import {
+  compactInternalSilenceWav,
+  DEFAULT_MAX_CHUNK_SEC,
+  DEFAULT_MIN_CHUNK_SEC,
+  encodePcm16MonoWav,
+  getSilenceRmsThreshold,
+  splitWavIntoChunks,
+  trimSilenceWav,
+} from './wavUtils';
 
 const execFileAsync = promisify(execFile);
 
@@ -523,8 +531,10 @@ export class LlamaServerBackend implements AsrBackend {
     }
 
     const t0 = performance.now();
-    const trimmed = trimSilenceWav(req.wavBuffer);
-    const chunks = splitWavIntoChunks(trimmed, 28, 16);
+    const rmsThreshold = getSilenceRmsThreshold(req.micProfile ?? 'quiet');
+    const trimmed = trimSilenceWav(req.wavBuffer, 80, 110, rmsThreshold);
+    const compacted = compactInternalSilenceWav(trimmed, { rmsThreshold });
+    const chunks = splitWavIntoChunks(compacted, DEFAULT_MAX_CHUNK_SEC, DEFAULT_MIN_CHUNK_SEC);
 
     const texts: string[] = [];
     let detectedLanguage: string | undefined;
@@ -619,7 +629,7 @@ export class LlamaServerBackend implements AsrBackend {
       body: JSON.stringify({
         messages,
         temperature: 0,
-        max_tokens: 512,
+        max_tokens: 1024,
         chat_template_kwargs: chatTemplateKwargs,
       }),
     });

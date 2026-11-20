@@ -29,7 +29,13 @@ const {
   decodeMonoWavSamples,
   computeWavStats,
   trimSilenceWav,
+  compactInternalSilenceWav,
   splitWavIntoChunks,
+  getSilenceRmsThreshold,
+  QUIET_SILENCE_RMS_THRESHOLD,
+  NOISY_SILENCE_RMS_THRESHOLD,
+  DEFAULT_MAX_CHUNK_SEC,
+  DEFAULT_MIN_CHUNK_SEC,
 } = await import('../src/main/asr/wavUtils');
 const {
   parseDeviceListOutput,
@@ -261,4 +267,96 @@ test('SoundResolver resolves bundled and custom sound slots to data URLs', () =>
   } finally {
     fs.rmSync(tmpCustom, { recursive: true, force: true });
   }
+});
+
+test('getSilenceRmsThreshold and trimSilenceWav preserve soft whispers in quiet mode', () => {
+  assert.equal(getSilenceRmsThreshold('quiet'), QUIET_SILENCE_RMS_THRESHOLD);
+  assert.equal(getSilenceRmsThreshold('noisy'), NOISY_SILENCE_RMS_THRESHOLD);
+
+  const sr = 16000;
+  const head = new Int16Array(sr * 1);
+  // Soft whisper sine (amplitude 120 -> RMS ~85: >= 50 quiet threshold, < 120 noisy threshold)
+  const softWhisper = makeSineSamples(sr, 0.8, 300, 120);
+  const tail = new Int16Array(sr * 1);
+  const combined = new Int16Array(head.length + softWhisper.length + tail.length);
+  combined.set(head, 0);
+  combined.set(softWhisper, head.length);
+  combined.set(tail, head.length + softWhisper.length);
+
+  const rawWav = encodePcm16MonoWav(combined, sr);
+  const quietTrimmed = trimSilenceWav(rawWav, 80, 110, QUIET_SILENCE_RMS_THRESHOLD);
+  const quietDurMs = (decodeMonoWavSamples(quietTrimmed).samples.length / sr) * 1000;
+  assert.ok(quietDurMs >= 940 && quietDurMs <= 1050, `Expected ~990ms, got ${quietDurMs}`);
+
+  // With noisy threshold (120), the 85 RMS whisper isn't detected as active so buffer is unchanged
+  const noisyTrimmed = trimSilenceWav(rawWav, 80, 110, NOISY_SILENCE_RMS_THRESHOLD);
+  assert.equal(decodeMonoWavSamples(noisyTrimmed).samples.length, combined.length);
+});
+
+test('compactInternalSilenceWav compacts pauses > 800ms to 350ms with splice fade and leaves short pauses untouched', () => {
+  const sr = 16000;
+
+  // Short pause (500ms < 800ms) -> passes through completely untouched
+  const s1 = makeSineSamples(sr, 0.6, 440, 6000);
+  const shortPause = new Int16Array(Math.floor(sr * 0.5));
+  const s2 = makeSineSamples(sr, 0.6, 520, 6000);
+  const noLongPause = new Int16Array(s1.length + shortPause.length + s2.length);
+  noLongPause.set(s1, 0);
+  noLongPause.set(shortPause, s1.length);
+  noLongPause.set(s2, s1.length + shortPause.length);
+  const noLongPauseWav = encodePcm16MonoWav(noLongPause, sr);
+  assert.equal(compactInternalSilenceWav(noLongPauseWav), noLongPauseWav);
+
+  // Very short clip (< 800ms total) -> untouched
+  const shortClipWav = encodePcm16MonoWav(makeSineSamples(sr, 0.4, 440, 6000), sr);
+  assert.equal(compactInternalSilenceWav(shortClipWav), shortClipWav);
+
+  // Long internal pause (2.4s) with small DC/floor (20 < 50) -> compacted to 350ms with 10ms fade to 0 at splice
+  const longPause = new Int16Array(Math.floor(sr * 2.4)).fill(20);
+  const withLongPause = new Int16Array(s1.length + longPause.length + s2.length);
+  withLongPause.set(s1, 0);
+  withLongPause.set(longPause, s1.length);
+  withLongPause.set(s2, s1.length + longPause.length);
+
+  const compactedWav = compactInternalSilenceWav(encodePcm16MonoWav(withLongPause, sr), {
+    rmsThreshold: QUIET_SILENCE_RMS_THRESHOLD,
+  });
+  const decoded = decodeMonoWavSamples(compactedWav);
+  const expectedSamples = s1.length + s2.length + Math.round(sr * 0.35);
+  assert.equal(decoded.samples.length, expectedSamples);
+
+  // Verify splice boundary fades smoothly through 0 (175ms into the retained pause)
+  const spliceIdx = s1.length + Math.floor(Math.round(sr * 0.35) / 2);
+  assert.equal(decoded.samples[spliceIdx - 1], 0);
+  assert.equal(decoded.samples[spliceIdx], 0);
+  // Before fade-out region (earlier in lead pause), floor value 20 is intact
+  assert.equal(decoded.samples[s1.length + 10], 20);
+});
+
+test('splitWavIntoChunks defaults to 90s max / 45s min and splits 110s WAV cleanly', () => {
+  assert.equal(DEFAULT_MAX_CHUNK_SEC, 90);
+  assert.equal(DEFAULT_MIN_CHUNK_SEC, 45);
+
+  const sr = 16000;
+  // 60s WAV stays a single chunk under default 90s cap
+  const sixtySecWav = encodePcm16MonoWav(makeSineSamples(sr, 60, 440, 4000), sr);
+  const singleChunks = splitWavIntoChunks(sixtySecWav);
+  assert.equal(singleChunks.length, 1);
+
+  // 110s WAV with a 0.5s quiet valley at 60s (within [45s, 90s]) splits into 2 chunks <= 90s
+  const longSamples = makeSineSamples(sr, 110, 440, 4000);
+  const valleyStart = Math.floor(59.75 * sr);
+  const valleyEnd = Math.floor(60.25 * sr);
+  for (let i = valleyStart; i < valleyEnd; i++) {
+    longSamples[i] = 0;
+  }
+
+  const chunks = splitWavIntoChunks(encodePcm16MonoWav(longSamples, sr));
+  assert.equal(chunks.length, 2);
+  for (const chunk of chunks) {
+    const durSec = decodeMonoWavSamples(chunk).samples.length / sr;
+    assert.ok(durSec <= 90, `Chunk exceeded 90s: ${durSec}s`);
+  }
+  const firstDurSec = decodeMonoWavSamples(chunks[0]).samples.length / sr;
+  assert.ok(firstDurSec >= 59.7 && firstDurSec <= 60.3, `Expected split near 60s, got ${firstDurSec}s`);
 });

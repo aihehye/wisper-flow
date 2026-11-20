@@ -145,6 +145,7 @@ export function createDefaultSettings(platform: PlatformKind = process.platform 
       allLowercaseGlobal: false,
       allLowercaseApps: [],
     },
+    micProfile: 'quiet',
     whisperModeBoost: false,
     asrEngine: 'llama-server',
     customCrispAsrPath: '',

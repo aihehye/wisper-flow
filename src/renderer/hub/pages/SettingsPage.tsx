@@ -22,6 +22,7 @@ import type {
   AudioDeviceOption,
   DockPosition,
   LinuxPasteBackend,
+  MicProfile,
   ModelStatus,
   OmarchyEnvironment,
   ShortcutsConfig,
@@ -286,6 +287,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
           setMicLevel(level);
           setMicDead(peakZero);
         },
+        settings.micProfile,
       );
     } catch {
       setMicTesting(false);
@@ -557,9 +559,39 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
 
             <div className="setting-row">
               <div className="setting-info">
+                <div className="setting-label">Microphone Environment</div>
+                <div className="setting-desc">
+                  {settings.micProfile === 'quiet'
+                    ? 'Quiet Room: disables browser noise suppression & echo cancellation and uses a whisper-safe silence threshold.'
+                    : 'Outside / Noisy: enables echo cancellation & noise suppression for loud environments.'}
+                </div>
+              </div>
+              <div className="setting-control">
+                <div className="flag-pills" role="group" aria-label="Microphone environment">
+                  {(
+                    [
+                      { value: 'quiet' as MicProfile, label: 'Quiet Room' },
+                      { value: 'noisy' as MicProfile, label: 'Outside' },
+                    ] as const
+                  ).map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      className={`btn btn-sm ${settings.micProfile === opt.value ? 'btn-primary' : ''}`}
+                      onClick={() => void onUpdateSettings({ micProfile: opt.value })}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="setting-row">
+              <div className="setting-info">
                 <div className="setting-label">Whisper Mode</div>
                 <div className="setting-desc">
-                  Applies a clean soft-limited gain boost for quiet late-night speech.
+                  Applies a clean soft-limited gain boost for quiet late-night speech (always active in Quiet Room).
                 </div>
               </div>
               <div className="setting-control">

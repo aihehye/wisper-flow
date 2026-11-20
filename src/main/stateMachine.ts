@@ -7,13 +7,16 @@ import { runTextPipeline } from './pipeline/textPipeline.ts';
 import { scheduleCorrectionWatch } from './pipeline/correctionWatcher.ts';
 import type {
   AppSettings,
+  DictionaryEntry,
   HistoryEntry,
   HudPayload,
   HudVisualState,
+  MicProfile,
   SoundSlot,
 } from '../shared/types';
 import type { AsrBackend } from './asr/types';
 import type { ForegroundAppInfo, PlatformBridge } from './platform/types';
+import type { CorpusStore } from './storage/corpusStore';
 import type { AppDatabase } from './storage/db';
 
 export interface StateMachineDeps {
@@ -21,12 +24,14 @@ export interface StateMachineDeps {
   platform: PlatformBridge;
   asr: AsrBackend;
   db: AppDatabase;
+  corpusStore?: Pick<CorpusStore, 'saveClip'>;
   sendHudState: (payload: HudPayload) => void;
   sendRecordCommand: (cmd: {
     action: 'start' | 'stop' | 'cancel';
     sessionId: string;
     deviceId: string;
     whisperMode: boolean;
+    micProfile?: MicProfile;
   }) => void;
   playSound: (slot: SoundSlot) => void;
   onHistoryAdded: (entry: HistoryEntry) => void;
@@ -37,6 +42,7 @@ export interface StateMachineDeps {
 export interface AudioSubmitPayload {
   sessionId: string;
   wavBuffer: Buffer;
+  opusBuffer?: Buffer;
   speechDurationMs: number;
   totalDurationMs: number;
   isSilent?: boolean;
@@ -49,6 +55,30 @@ const FALLBACK_APP: ForegroundAppInfo = {
   title: '',
   isTerminal: false,
 };
+
+/**
+ * Builds deduplicated ASR vocabulary hints from enabled dictionary entries,
+ * preferring target spellings (`replacement`) over misheard `phrase` triggers.
+ */
+export function buildDictionaryContextHints(
+  dictionary: ReadonlyArray<Pick<DictionaryEntry, 'enabled' | 'phrase' | 'replacement'>>
+): string[] {
+  const seen = new Set<string>();
+  const hints: string[] = [];
+
+  for (const entry of dictionary) {
+    if (!entry.enabled) continue;
+    const hint = entry.replacement?.trim() || entry.phrase.trim();
+    if (!hint) continue;
+
+    const normalized = hint.toLowerCase();
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    hints.push(hint);
+  }
+
+  return hints;
+}
 
 export class DictationStateMachine {
   private readonly deps: StateMachineDeps;
@@ -86,6 +116,7 @@ export class DictationStateMachine {
       pushToTalkLabel: settings.shortcuts.pushToTalk,
       handsFreeLabel: settings.shortcuts.handsFree,
       microphoneDeviceId: settings.microphoneDeviceId,
+      micProfile: settings.micProfile,
       recordingStartedAt: this.recordingStartedAt ?? undefined,
     };
   }
@@ -125,6 +156,20 @@ export class DictationStateMachine {
       clearTimeout(this.suggestionToastTimer);
       this.suggestionToastTimer = null;
     }
+  }
+
+  private emitRecordCommand(
+    action: 'start' | 'stop' | 'cancel',
+    sessionId: string,
+    settings: AppSettings
+  ): void {
+    this.deps.sendRecordCommand({
+      action,
+      sessionId,
+      deviceId: settings.microphoneDeviceId,
+      whisperMode: settings.micProfile === 'quiet' || settings.whisperModeBoost,
+      micProfile: settings.micProfile,
+    });
   }
 
   private emitHudState(toast?: { message: string; kind: 'info' | 'warning' | 'error' }): void {
@@ -204,12 +249,7 @@ export class DictationStateMachine {
       .catch(() => FALLBACK_APP);
 
     this.deps.playSound(mode === 'active_popo' ? 'popoLock' : 'start');
-    this.deps.sendRecordCommand({
-      action: 'start',
-      sessionId,
-      deviceId: settings.microphoneDeviceId,
-      whisperMode: settings.whisperModeBoost,
-    });
+    this.emitRecordCommand('start', sessionId, settings);
     this.emitHudState();
 
     this.warnTimer = setTimeout(() => {
@@ -241,12 +281,7 @@ export class DictationStateMachine {
 
     this.state = 'processing';
     this.deps.playSound('stop');
-    this.deps.sendRecordCommand({
-      action: 'stop',
-      sessionId: activeSessionId,
-      deviceId: settings.microphoneDeviceId,
-      whisperMode: settings.whisperModeBoost,
-    });
+    this.emitRecordCommand('stop', activeSessionId, settings);
     this.emitHudState();
 
     await this.unmuteAudioSafely();
@@ -311,12 +346,7 @@ export class DictationStateMachine {
       this.state = this.computeIdleState();
 
       if (cancelledSessionId) {
-        this.deps.sendRecordCommand({
-          action: 'cancel',
-          sessionId: cancelledSessionId,
-          deviceId: settings.microphoneDeviceId,
-          whisperMode: settings.whisperModeBoost,
-        });
+        this.emitRecordCommand('cancel', cancelledSessionId, settings);
       }
 
       if (this.shortTapStreak >= 2) {
@@ -394,12 +424,7 @@ export class DictationStateMachine {
     this.state = this.computeIdleState();
 
     if (cancelledSessionId) {
-      this.deps.sendRecordCommand({
-        action: 'cancel',
-        sessionId: cancelledSessionId,
-        deviceId: settings.microphoneDeviceId,
-        whisperMode: settings.whisperModeBoost,
-      });
+      this.emitRecordCommand('cancel', cancelledSessionId, settings);
     }
 
     this.emitHudState();
@@ -430,12 +455,7 @@ export class DictationStateMachine {
     this.state = this.computeIdleState();
 
     if (wasRecording && cancelledSessionId) {
-      this.deps.sendRecordCommand({
-        action: 'cancel',
-        sessionId: cancelledSessionId,
-        deviceId: settings.microphoneDeviceId,
-        whisperMode: settings.whisperModeBoost,
-      });
+      this.emitRecordCommand('cancel', cancelledSessionId, settings);
     }
 
     this.emitHudState();
@@ -475,7 +495,7 @@ export class DictationStateMachine {
 
     const dictionary = this.deps.db.listDictionary();
     const contextHints = settings.useDictionaryHints
-      ? dictionary.filter((d) => d.enabled).map((d) => d.phrase)
+      ? buildDictionaryContextHints(dictionary)
       : undefined;
 
     let rawText = '';
@@ -487,6 +507,7 @@ export class DictationStateMachine {
         language: settings.language,
         rumble: settings.rumble,
         contextHints,
+        micProfile: settings.micProfile,
       });
       rawText = asrResult.rawText;
       detectedLanguage = asrResult.detectedLanguage;
@@ -559,6 +580,9 @@ export class DictationStateMachine {
       tokensEstimated: asrUsage?.estimated ?? false,
     });
     this.deps.onHistoryAdded(historyEntry);
+    if (payload.opusBuffer && payload.opusBuffer.length > 0 && this.deps.corpusStore) {
+      void this.deps.corpusStore.saveClip(historyEntry.id, payload.opusBuffer).catch(() => {});
+    }
 
     this.sessionId = null;
     this.recordingStartedAt = null;
@@ -582,11 +606,16 @@ export class DictationStateMachine {
     scheduleCorrectionWatch(
       {
         pastedText: textToPaste,
+        historyId: historyEntry.id,
         targetAppName: capturedApp.processName,
         targetWindowTitle: capturedApp.title,
         readFocusedText: this.deps.platform.readFocusedText
           ? () => this.deps.platform.readFocusedText!()
           : undefined,
+        onCorrectedText: ({ historyId, correctedText }) => {
+          if (this.disposed || !historyId) return;
+          this.deps.db.setHistoryCorrectedText(historyId, correctedText);
+        },
       },
       (candidate) => {
         if (this.disposed) return;

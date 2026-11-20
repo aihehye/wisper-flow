@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Mic, Square, X } from 'lucide-react';
-import type { HudPayload } from '@shared/types';
+import type { HudPayload, MicProfile } from '@shared/types';
 import { audioPlayer } from '../shared/audioPlayer';
 import {
   disposeWarmMic,
@@ -32,6 +32,7 @@ export const HudApp: React.FC = () => {
   const abortedSessionIdRef = useRef<string | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
   const microphoneDeviceIdRef = useRef<string>('default');
+  const micProfileRef = useRef<MicProfile>('quiet');
   const pendingDeviceRefreshRef = useRef<boolean>(false);
   const hoverTimerRef = useRef<number | null>(null);
   const hoveredRef = useRef(false);
@@ -55,7 +56,10 @@ export const HudApp: React.FC = () => {
         return;
       }
       pendingDeviceRefreshRef.current = false;
-      void warmMic(microphoneDeviceIdRef.current, { forceRefresh }).catch(() => {});
+      void warmMic(microphoneDeviceIdRef.current, {
+        forceRefresh,
+        micProfile: micProfileRef.current,
+      }).catch(() => {});
     };
 
     void window.wisperHud
@@ -66,6 +70,9 @@ export const HudApp: React.FC = () => {
           setPayload(initial);
           if (initial.microphoneDeviceId) {
             microphoneDeviceIdRef.current = initial.microphoneDeviceId;
+          }
+          if (initial.micProfile) {
+            micProfileRef.current = initial.micProfile;
           }
         }
         refreshWarmMic();
@@ -79,7 +86,7 @@ export const HudApp: React.FC = () => {
     const handleDeviceChange = () => {
       void syncAudioDevices();
       const currentDeviceId = microphoneDeviceIdRef.current;
-      if (currentDeviceId === 'default' || !isWarmMicHealthy(currentDeviceId)) {
+      if (currentDeviceId === 'default' || !isWarmMicHealthy(currentDeviceId, micProfileRef.current)) {
         refreshWarmMic(currentDeviceId === 'default');
       }
     };
@@ -88,8 +95,16 @@ export const HudApp: React.FC = () => {
     const unsubState = window.wisperHud?.onHudState((next) => {
       if (!mounted) return;
       setPayload(next);
+      let needsWarmRefresh = false;
       if (next.microphoneDeviceId && next.microphoneDeviceId !== microphoneDeviceIdRef.current) {
         microphoneDeviceIdRef.current = next.microphoneDeviceId;
+        needsWarmRefresh = true;
+      }
+      if (next.micProfile && next.micProfile !== micProfileRef.current) {
+        micProfileRef.current = next.micProfile;
+        needsWarmRefresh = true;
+      }
+      if (needsWarmRefresh) {
         refreshWarmMic();
       }
       if (next.toastMessage) {
@@ -120,6 +135,7 @@ export const HudApp: React.FC = () => {
           try {
             const session = await startMicCapture({
               deviceId: cmd.deviceId,
+              micProfile: cmd.micProfile ?? micProfileRef.current,
               whisperMode: cmd.whisperMode,
               onLevels: (bars) => {
                 if (mounted) setLiveBars(bars);
@@ -192,6 +208,7 @@ export const HudApp: React.FC = () => {
           await window.wisperHud?.submitAudio({
             sessionId: sid,
             wavBuffer: res.wavBuffer,
+            opusBuffer: res.opusBuffer,
             durationMs: res.durationMs,
             speechDurationMs: res.speechDurationMs,
             peakLevel: res.peakLevel,
@@ -315,6 +332,23 @@ export const HudApp: React.FC = () => {
             onMouseLeave={handlePointerLeave}
           >
             <span>Click to dictate · {payload.pushToTalkLabel}</span>
+            {!isVertical && (
+              <button
+                type="button"
+                className={`hud-mode-chip ${payload.micProfile === 'noisy' ? 'noisy' : 'quiet'}`}
+                title="Switch microphone environment (Quiet Room / Outside)"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const nextProfile: MicProfile =
+                    payload.micProfile === 'noisy' ? 'quiet' : 'noisy';
+                  void window.wisperHud
+                    ?.sendAction({ type: 'set-mic-profile', value: nextProfile })
+                    .catch(() => {});
+                }}
+              >
+                {payload.micProfile === 'noisy' ? 'Outside' : 'Quiet'}
+              </button>
+            )}
           </div>
         )}
 

@@ -8,7 +8,7 @@ import { AppDatabase } from '../src/main/storage/db.ts';
 // @ts-ignore Node --experimental-strip-types requires explicit .ts extension
 import { computeUsageStats } from '../src/main/storage/stats.ts';
 // @ts-ignore Node --experimental-strip-types requires explicit .ts extension
-import { DictationStateMachine } from '../src/main/stateMachine.ts';
+import { buildDictionaryContextHints, DictationStateMachine } from '../src/main/stateMachine.ts';
 import type { AsrBackend, TranscribeRequest, TranscribeResult } from '../src/main/asr/types';
 import type {
   ForegroundAppInfo,
@@ -44,6 +44,7 @@ function createHarness(opts?: {
     sessionId: string;
     deviceId: string;
     whisperMode: boolean;
+    micProfile?: string;
   }> = [];
   const sounds: SoundSlot[] = [];
   const historyAdded: HistoryEntry[] = [];
@@ -287,6 +288,8 @@ describe('DictationStateMachine', () => {
 
       const startCmd = h.recordCommands.find((c) => c.action === 'start');
       assert.ok(startCmd?.sessionId);
+      assert.equal(startCmd.micProfile, 'quiet');
+      assert.equal(startCmd.whisperMode, true);
 
       t.mock.timers.tick(650);
       await h.sm.handlePttUp();
@@ -304,7 +307,8 @@ describe('DictationStateMachine', () => {
 
       assert.equal(h.sm.getState(), 'resting');
       assert.equal(h.transcribeCalls.length, 1);
-      assert.deepEqual(h.transcribeCalls[0].contextHints, ['kubectl', 'kube cluster']);
+      assert.equal(h.transcribeCalls[0].micProfile, 'quiet');
+      assert.deepEqual(h.transcribeCalls[0].contextHints, ['kubectl', 'Kubernetes cluster']);
 
       assert.equal(h.pasteCalls.length, 1);
       assert.equal(h.pasteCalls[0].text, 'Open our Kubernetes cluster ISSUE-77!');
@@ -490,9 +494,31 @@ describe('AppDatabase & computeUsageStats', () => {
       assert.equal(stats.todayWords, 40);
       assert.equal(stats.streakDays, 3);
       assert.equal(stats.timeSavedMinutes, 1);
+
+      // Backward compatibility: legacy settings without micProfile default to 'quiet'
+      assert.equal(db.getSettings().micProfile, 'quiet');
+      assert.equal(db.updateSettings({ micProfile: 'noisy' }).micProfile, 'noisy');
     } finally {
       db.close();
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('buildDictionaryContextHints', () => {
+  it('uses target replacement spellings, trims, drops empties/disabled, and deduplicates case-insensitively', () => {
+    const hints = buildDictionaryContextHints([
+      { enabled: true, phrase: '  baller plate  ', replacement: '  Boilerplate  ' },
+      { enabled: true, phrase: 'whisper through', replacement: 'Wispr Flow' },
+      { enabled: true, phrase: 'wisper flow', replacement: 'wispr flow' },
+      { enabled: true, phrase: 'kubectl', replacement: null },
+      { enabled: true, phrase: 'Kubectl', replacement: '   ' },
+      { enabled: false, phrase: 'disabled phrase', replacement: 'DisabledTarget' },
+      { enabled: true, phrase: '   ', replacement: null },
+      { enabled: true, phrase: '   ', replacement: '   ' },
+      { enabled: true, phrase: 'doshin', replacement: 'Notion' },
+    ]);
+
+    assert.deepEqual(hints, ['Boilerplate', 'Wispr Flow', 'kubectl', 'Notion']);
   });
 });

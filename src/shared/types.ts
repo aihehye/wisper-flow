@@ -1,5 +1,7 @@
 export type PlatformKind = 'win32' | 'linux' | 'darwin';
 
+export type MicProfile = 'quiet' | 'noisy';
+
 export type HudVisualState =
   | 'hidden'
   | 'resting'
@@ -74,6 +76,7 @@ export interface AppSettings {
   linuxPasteBackend: LinuxPasteBackend;
   theme: ThemeMode;
   cleanup: CleanupOptions;
+  micProfile: MicProfile;
   whisperModeBoost: boolean; // high-gain mic boost toggle
   asrEngine: 'llama-server' | 'crispasr';
   customCrispAsrPath: string;
@@ -133,6 +136,27 @@ export interface HistoryEntry {
   completionTokens?: number;
   totalTokens?: number;
   tokensEstimated?: boolean;
+  audioPath?: string | null;
+  correctedText?: string | null;
+}
+
+export interface CorpusStats {
+  clipCount: number;
+  totalSpeechDurationSec: number;
+  totalDurationSec: number;
+  totalBytes: number;
+  maxBytes: number;
+  corpusDir: string;
+}
+
+export interface CorpusExportResult {
+  outputDir: string;
+  manifestPath: string;
+  readmePath: string;
+  exportedCount: number;
+  skippedMissingCount: number;
+  totalBytes: number;
+  totalSpeechDurationSec: number;
 }
 
 export interface DictionarySuggestion {
@@ -261,6 +285,7 @@ export interface HudPayload {
   pushToTalkLabel: string;
   handsFreeLabel: string;
   microphoneDeviceId?: string;
+  micProfile?: MicProfile;
   toastMessage?: string;
   toastKind?: 'info' | 'warning' | 'error';
   audioLevels?: number[]; // 10 normalized values 0..1

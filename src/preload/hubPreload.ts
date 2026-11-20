@@ -3,6 +3,8 @@ import { IPC } from '../shared/ipcChannels';
 import type {
   AppSettings,
   AudioDeviceOption,
+  CorpusExportResult,
+  CorpusStats,
   DictionaryEntry,
   DictionarySuggestion,
   HistoryEntry,
@@ -117,6 +119,11 @@ export const wisperHubApi = {
   clearHistory: (): Promise<void> => ipcRenderer.invoke(IPC.HISTORY_CLEAR),
   pasteHistoryEntry: (id: string): Promise<void> => ipcRenderer.invoke(IPC.HISTORY_PASTE_ENTRY, id),
   copyHistoryEntry: (id: string): Promise<void> => ipcRenderer.invoke(IPC.HISTORY_COPY_ENTRY, id),
+  setHistoryCorrectedText: (id: string, correctedText: string | null): Promise<void> =>
+    ipcRenderer.invoke(IPC.HISTORY_SET_CORRECTED_TEXT, id, correctedText),
+  getCorpusStats: (): Promise<CorpusStats | null> => ipcRenderer.invoke(IPC.CORPUS_STATS),
+  exportCorpus: (outputDir?: string): Promise<CorpusExportResult | null> =>
+    ipcRenderer.invoke(IPC.CORPUS_EXPORT, outputDir),
   getStats: (): Promise<UsageStats> => ipcRenderer.invoke(IPC.STATS_GET),
   getTokenStats: (): Promise<TokenUsageStats> => ipcRenderer.invoke(IPC.TOKEN_STATS_GET),
 

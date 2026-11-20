@@ -1,6 +1,6 @@
 import { Menu, Tray, nativeImage } from 'electron';
 import { RUMBLE_LANGUAGES } from '../shared/defaults';
-import type { AppSettings, AudioDeviceOption, HistoryEntry } from '../shared/types';
+import type { AppSettings, AudioDeviceOption, HistoryEntry, MicProfile } from '../shared/types';
 
 export interface TrayCallbacks {
   onOpenHub: () => void;
@@ -8,6 +8,7 @@ export interface TrayCallbacks {
   onPasteLast: () => void;
   onCopyLast: () => void;
   onSelectMic: (deviceId: string) => void;
+  onSelectMicProfile: (profile: MicProfile) => void;
   onSelectLanguage: (language: string) => void;
   onToggleFlowBar: () => void;
   onQuit: () => void;
@@ -162,6 +163,23 @@ export class AppTrayController {
       {
         label: 'Microphone',
         submenu: micItems,
+      },
+      {
+        label: 'Mic Environment',
+        submenu: [
+          {
+            label: 'Quiet Room (Whisper)',
+            type: 'radio',
+            checked: this.settings.micProfile === 'quiet',
+            click: () => this.callbacks.onSelectMicProfile('quiet'),
+          },
+          {
+            label: 'Outside (Noisy)',
+            type: 'radio',
+            checked: this.settings.micProfile === 'noisy',
+            click: () => this.callbacks.onSelectMicProfile('noisy'),
+          },
+        ],
       },
       {
         label: 'Language',

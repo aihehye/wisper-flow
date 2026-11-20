@@ -1,6 +1,12 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import { IPC } from '../shared/ipcChannels';
-import type { AudioDeviceOption, DockPosition, HudPayload, SoundSlot } from '../shared/types';
+import type {
+  AudioDeviceOption,
+  DockPosition,
+  HudPayload,
+  MicProfile,
+  SoundSlot,
+} from '../shared/types';
 
 export type HudActionType =
   | 'click-toggle'
@@ -12,6 +18,7 @@ export type HudActionType =
   | 'set-dock'
   | 'toggle-hide'
   | 'set-mic'
+  | 'set-mic-profile'
   | 'set-language';
 
 export interface HudActionPayload {
@@ -22,6 +29,7 @@ export interface HudActionPayload {
 export interface HudAudioSubmitPayload {
   sessionId: string;
   wavBuffer: Uint8Array;
+  opusBuffer?: Uint8Array;
   durationMs: number;
   speechDurationMs: number;
   peakLevel: number;
@@ -33,6 +41,7 @@ export interface RecordCommandPayload {
   action: 'start' | 'stop' | 'cancel';
   sessionId: string;
   deviceId?: string;
+  micProfile?: MicProfile;
   whisperMode?: boolean;
 }
 

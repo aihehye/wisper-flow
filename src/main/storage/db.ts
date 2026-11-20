@@ -78,6 +78,8 @@ interface HistoryRow {
   completion_tokens: number;
   total_tokens: number;
   tokens_estimated: number;
+  audio_path: string | null;
+  corrected_text: string | null;
 }
 
 function mapDictionaryRow(row: DictionaryRow): DictionaryEntry {
@@ -151,6 +153,8 @@ function mapHistoryRow(row: HistoryRow): HistoryEntry {
     completionTokens: row.completion_tokens ?? 0,
     totalTokens: row.total_tokens ?? 0,
     tokensEstimated: Boolean(row.tokens_estimated),
+    audioPath: row.audio_path ?? null,
+    correctedText: row.corrected_text ?? null,
   };
 }
 
@@ -170,6 +174,10 @@ function mergeSettings(base: AppSettings, patch?: Partial<AppSettings> | null): 
   return {
     ...base,
     ...patch,
+    micProfile:
+      patch.micProfile === 'quiet' || patch.micProfile === 'noisy'
+        ? patch.micProfile
+        : base.micProfile,
     shortcuts: {
       ...base.shortcuts,
       ...(patch.shortcuts ?? {}),
@@ -278,6 +286,7 @@ export class AppDatabase {
     `);
 
     this.migrateHistoryTokenColumns();
+    this.migrateHistoryCorpusColumns();
   }
 
   private migrateHistoryTokenColumns(): void {
@@ -288,6 +297,20 @@ export class AppDatabase {
       ['completion_tokens', 'INTEGER NOT NULL DEFAULT 0'],
       ['total_tokens', 'INTEGER NOT NULL DEFAULT 0'],
       ['tokens_estimated', 'INTEGER NOT NULL DEFAULT 0'],
+    ];
+    for (const [col, def] of additions) {
+      if (!existing.has(col)) {
+        this.db.exec(`ALTER TABLE history ADD COLUMN ${col} ${def}`);
+      }
+    }
+  }
+
+  private migrateHistoryCorpusColumns(): void {
+    const cols = this.db.prepare('PRAGMA table_info(history)').all() as Array<{ name: string }>;
+    const existing = new Set(cols.map((c) => c.name));
+    const additions: Array<[string, string]> = [
+      ['audio_path', 'TEXT'],
+      ['corrected_text', 'TEXT'],
     ];
     for (const [col, def] of additions) {
       if (!existing.has(col)) {
@@ -712,8 +735,9 @@ export class AppDatabase {
           id, timestamp, asr_text, formatted_text, pasted_text,
           app_name, window_title, duration_sec, speech_duration_sec,
           num_words, e2e_latency_ms, language, mic_device, archived,
-          prompt_tokens, completion_tokens, total_tokens, tokens_estimated
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          prompt_tokens, completion_tokens, total_tokens, tokens_estimated,
+          audio_path, corrected_text
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -733,13 +757,30 @@ export class AppDatabase {
         Math.max(0, Math.round(entry.promptTokens ?? 0)),
         Math.max(0, Math.round(entry.completionTokens ?? 0)),
         Math.max(0, Math.round(entry.totalTokens ?? 0)),
-        entry.tokensEstimated ? 1 : 0
+        entry.tokensEstimated ? 1 : 0,
+        entry.audioPath ?? null,
+        entry.correctedText ?? null
       );
 
     const saved = this.db
       .prepare('SELECT * FROM history WHERE id = ?')
       .get(id) as unknown as HistoryRow;
     return mapHistoryRow(saved);
+  }
+
+  setHistoryAudioPath(id: string, audioPath: string | null): void {
+    this.db.prepare('UPDATE history SET audio_path = ? WHERE id = ?').run(audioPath, id);
+  }
+
+  setHistoryCorrectedText(id: string, correctedText: string | null): void {
+    this.db.prepare('UPDATE history SET corrected_text = ? WHERE id = ?').run(correctedText, id);
+  }
+
+  listCorpusEntries(): HistoryEntry[] {
+    const rows = this.db
+      .prepare('SELECT * FROM history WHERE audio_path IS NOT NULL ORDER BY timestamp ASC, rowid ASC')
+      .all() as unknown as HistoryRow[];
+    return rows.map(mapHistoryRow);
   }
 
   deleteHistory(id: string): void {

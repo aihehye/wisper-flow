@@ -1,10 +1,11 @@
-import type { AsrStatusState, GpuDeviceInfo, ModelStatus, RumbleOptions } from '../../shared/types';
+import type { AsrStatusState, GpuDeviceInfo, MicProfile, ModelStatus, RumbleOptions } from '../../shared/types';
 
 export interface TranscribeRequest {
   wavBuffer: Buffer;
   language: string; // 'auto' or e.g. 'English', 'en'
   rumble: RumbleOptions;
   contextHints?: string[]; // Vocabulary hints from Dictionary
+  micProfile?: MicProfile;
 }
 
 export interface TokenUsage {

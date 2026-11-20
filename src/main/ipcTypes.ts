@@ -33,6 +33,7 @@ export interface HudActionPayload {
     | 'set-dock'
     | 'toggle-hide'
     | 'set-mic'
+    | 'set-mic-profile'
     | 'set-language';
   value?: DockPosition | string | boolean;
 }
@@ -40,6 +41,7 @@ export interface HudActionPayload {
 export interface HudAudioSubmitPayload {
   sessionId: string;
   wavBuffer: Uint8Array;
+  opusBuffer?: Uint8Array;
   durationMs: number;
   speechDurationMs: number;
   peakLevel: number;

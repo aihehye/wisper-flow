@@ -27,6 +27,9 @@ export const IPC = {
   HISTORY_CLEAR: 'history:clear',
   HISTORY_PASTE_ENTRY: 'history:paste-entry',
   HISTORY_COPY_ENTRY: 'history:copy-entry',
+  HISTORY_SET_CORRECTED_TEXT: 'history:set-corrected-text',
+  CORPUS_STATS: 'corpus:stats',
+  CORPUS_EXPORT: 'corpus:export',
   STATS_GET: 'stats:get',
   TOKEN_STATS_GET: 'stats:tokens-get',
 
@@ -49,7 +52,7 @@ export const IPC = {
 
   // HUD <-> Main
   HUD_GET_STATE: 'hud:get-state',
-  HUD_ACTION: 'hud:action', // click-toggle, cancel, stop, open-hub, open-shortcuts, paste-last, set-dock, toggle-hide, set-mic, set-language
+  HUD_ACTION: 'hud:action', // click-toggle, cancel, stop, open-hub, open-shortcuts, paste-last, set-dock, toggle-hide, set-mic, set-mic-profile, set-language
   HUD_AUDIO_SUBMIT: 'hud:audio-submit', // Float32Array/ArrayBuffer PCM + durationMs + error
   HUD_MOUSE_ENTER: 'hud:mouse-enter',
   HUD_MOUSE_LEAVE: 'hud:mouse-leave',
@@ -57,7 +60,7 @@ export const IPC = {
 
   // Main -> Renderers (push events)
   EVENT_HUD_STATE: 'event:hud-state',
-  EVENT_RECORD_CMD: 'event:record-cmd', // { action: 'start' | 'stop' | 'cancel', sessionId, deviceId, whisperMode }
+  EVENT_RECORD_CMD: 'event:record-cmd', // { action: 'start' | 'stop' | 'cancel', sessionId, deviceId, micProfile, whisperMode }
   EVENT_PLAY_SOUND: 'event:play-sound', // { slot, dataUrl }
   EVENT_SHORTCUT_CAPTURED: 'event:shortcut-captured',
   EVENT_MODEL_STATUS: 'event:model-status',

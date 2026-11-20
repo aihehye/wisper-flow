@@ -1,3 +1,5 @@
+import type { MicProfile } from '../../shared/types';
+
 export interface DecodedWav {
   sampleRate: number;
   samples: Int16Array;
@@ -10,8 +12,46 @@ export interface WavStats {
   isSilent: boolean;
 }
 
+export interface CompactSilenceOptions {
+  rmsThreshold?: number;
+  minPauseMs?: number;
+  targetPauseMs?: number;
+  fadeMs?: number;
+}
+
 const DEFAULT_SAMPLE_RATE = 16000;
-const FRAME_SILENCE_RMS_THRESHOLD = 120; // ~ -48.7 dBFS over 20ms frames
+export const QUIET_SILENCE_RMS_THRESHOLD = 50;
+export const NOISY_SILENCE_RMS_THRESHOLD = 120; // ~ -48.7 dBFS over 20ms frames
+export const DEFAULT_MAX_CHUNK_SEC = 90;
+export const DEFAULT_MIN_CHUNK_SEC = 45;
+
+export function getSilenceRmsThreshold(micProfile?: MicProfile): number {
+  return micProfile === 'quiet' ? QUIET_SILENCE_RMS_THRESHOLD : NOISY_SILENCE_RMS_THRESHOLD;
+}
+
+function computeActiveFrameFlags(
+  samples: Int16Array,
+  frameLen: number,
+  rmsThreshold: number
+): boolean[] {
+  const numSamples = samples.length;
+  const numFrames = Math.ceil(numSamples / frameLen);
+  const flags = new Array<boolean>(numFrames);
+
+  for (let frameIdx = 0; frameIdx < numFrames; frameIdx++) {
+    const start = frameIdx * frameLen;
+    const end = Math.min(numSamples, start + frameLen);
+    let sumSq = 0;
+    for (let i = start; i < end; i++) {
+      const s = samples[i];
+      sumSq += s * s;
+    }
+    const rms = Math.sqrt(sumSq / Math.max(1, end - start));
+    flags[frameIdx] = rms >= rmsThreshold;
+  }
+
+  return flags;
+}
 
 /**
  * Encodes mono 16-bit PCM samples (from Int16Array or normalized Float32Array [-1, 1])
@@ -204,28 +244,22 @@ export function computeWavStats(wavBuf: Buffer): WavStats {
  * Trims leading and trailing silence using 20ms frame-RMS gating (immune to single-sample clicks)
  * while preserving gentle speech onset/offset padding.
  */
-export function trimSilenceWav(wavBuf: Buffer, keepHeadMs = 80, keepTailMs = 110): Buffer {
+export function trimSilenceWav(
+  wavBuf: Buffer,
+  keepHeadMs = 80,
+  keepTailMs = 110,
+  rmsThreshold = NOISY_SILENCE_RMS_THRESHOLD
+): Buffer {
   const { sampleRate, samples } = decodeMonoWavSamples(wavBuf);
   const numSamples = samples.length;
   if (numSamples === 0 || sampleRate <= 0) return wavBuf;
 
   const frameLen = Math.max(1, Math.floor(sampleRate * 0.02)); // 20 ms frames
-  const numFrames = Math.ceil(numSamples / frameLen);
-
-  const isFrameActive = (frameIdx: number): boolean => {
-    const start = frameIdx * frameLen;
-    const end = Math.min(numSamples, start + frameLen);
-    let sumSq = 0;
-    for (let i = start; i < end; i++) {
-      const s = samples[i];
-      sumSq += s * s;
-    }
-    const rms = Math.sqrt(sumSq / Math.max(1, end - start));
-    return rms >= FRAME_SILENCE_RMS_THRESHOLD;
-  };
+  const activeFlags = computeActiveFrameFlags(samples, frameLen, rmsThreshold);
+  const numFrames = activeFlags.length;
 
   let firstActiveFrame = 0;
-  while (firstActiveFrame < numFrames && !isFrameActive(firstActiveFrame)) {
+  while (firstActiveFrame < numFrames && !activeFlags[firstActiveFrame]) {
     firstActiveFrame++;
   }
   if (firstActiveFrame >= numFrames) {
@@ -233,7 +267,7 @@ export function trimSilenceWav(wavBuf: Buffer, keepHeadMs = 80, keepTailMs = 110
   }
 
   let lastActiveFrame = numFrames - 1;
-  while (lastActiveFrame > firstActiveFrame && !isFrameActive(lastActiveFrame)) {
+  while (lastActiveFrame > firstActiveFrame && !activeFlags[lastActiveFrame]) {
     lastActiveFrame--;
   }
 
@@ -249,14 +283,147 @@ export function trimSilenceWav(wavBuf: Buffer, keepHeadMs = 80, keepTailMs = 110
 }
 
 /**
+ * Shortens internal silence runs longer than `minPauseMs` down to `targetPauseMs`,
+ * applying a brief linear fade at splice boundaries to prevent clicks or pops.
+ */
+export function compactInternalSilenceWav(
+  wavBuf: Buffer,
+  options: CompactSilenceOptions = {}
+): Buffer {
+  const { sampleRate, samples } = decodeMonoWavSamples(wavBuf);
+  const numSamples = samples.length;
+  if (numSamples === 0 || sampleRate <= 0) return wavBuf;
+
+  const rmsThreshold = options.rmsThreshold ?? NOISY_SILENCE_RMS_THRESHOLD;
+  const minPauseMs = Math.max(0, options.minPauseMs ?? 800);
+  const targetPauseMs = Math.max(0, Math.min(minPauseMs, options.targetPauseMs ?? 350));
+  const fadeMs = Math.max(0, options.fadeMs ?? 10);
+
+  const minPauseSamples = Math.floor((sampleRate * minPauseMs) / 1000);
+  if (numSamples <= minPauseSamples) {
+    return wavBuf;
+  }
+
+  const frameLen = Math.max(1, Math.floor(sampleRate * 0.02)); // 20 ms frames
+  const activeFlags = computeActiveFrameFlags(samples, frameLen, rmsThreshold);
+  const numFrames = activeFlags.length;
+
+  let firstActiveFrame = 0;
+  while (firstActiveFrame < numFrames && !activeFlags[firstActiveFrame]) {
+    firstActiveFrame++;
+  }
+  if (firstActiveFrame >= numFrames) {
+    return wavBuf;
+  }
+
+  let lastActiveFrame = numFrames - 1;
+  while (lastActiveFrame > firstActiveFrame && !activeFlags[lastActiveFrame]) {
+    lastActiveFrame--;
+  }
+
+  const targetSamples = Math.round((sampleRate * targetPauseMs) / 1000);
+  const requestedFadeSamples = Math.floor((sampleRate * fadeMs) / 1000);
+
+  const segments: Array<{ start: number; end: number; fadeOut: number; fadeIn: number }> = [];
+  let cursorSample = 0;
+  let compactedAny = false;
+  let f = firstActiveFrame;
+
+  while (f <= lastActiveFrame) {
+    if (activeFlags[f]) {
+      f++;
+      continue;
+    }
+
+    const runStartFrame = f;
+    while (f <= lastActiveFrame && !activeFlags[f]) {
+      f++;
+    }
+    const runEndFrame = f;
+
+    const runStartSample = runStartFrame * frameLen;
+    const runEndSample = Math.min(numSamples, runEndFrame * frameLen);
+    const runSamples = runEndSample - runStartSample;
+    const runDurationMs = (runSamples / sampleRate) * 1000;
+
+    if (runDurationMs > minPauseMs && runSamples > targetSamples) {
+      compactedAny = true;
+      const leadKeep = Math.floor(targetSamples / 2);
+      const tailKeep = targetSamples - leadKeep;
+      const fadeSamples = Math.min(requestedFadeSamples, leadKeep, tailKeep);
+
+      const leadEnd = runStartSample + leadKeep;
+      if (leadEnd > cursorSample) {
+        segments.push({
+          start: cursorSample,
+          end: leadEnd,
+          fadeOut: fadeSamples,
+          fadeIn: 0,
+        });
+      }
+
+      const tailStart = runEndSample - tailKeep;
+      if (tailStart < runEndSample) {
+        segments.push({
+          start: tailStart,
+          end: runEndSample,
+          fadeOut: 0,
+          fadeIn: fadeSamples,
+        });
+      }
+      cursorSample = runEndSample;
+    }
+  }
+
+  if (!compactedAny) {
+    return wavBuf;
+  }
+
+  if (cursorSample < numSamples) {
+    segments.push({ start: cursorSample, end: numSamples, fadeOut: 0, fadeIn: 0 });
+  }
+
+  let totalOut = 0;
+  for (const seg of segments) {
+    totalOut += seg.end - seg.start;
+  }
+
+  const out = new Int16Array(totalOut);
+  let writePos = 0;
+  for (const seg of segments) {
+    const segLen = seg.end - seg.start;
+    out.set(samples.subarray(seg.start, seg.end), writePos);
+
+    if (seg.fadeOut > 0) {
+      const fadeStart = writePos + segLen - seg.fadeOut;
+      for (let k = 0; k < seg.fadeOut; k++) {
+        const gain = (seg.fadeOut - 1 - k) / seg.fadeOut;
+        out[fadeStart + k] = Math.round(out[fadeStart + k] * gain);
+      }
+    }
+
+    if (seg.fadeIn > 0) {
+      for (let k = 0; k < seg.fadeIn; k++) {
+        const gain = k / seg.fadeIn;
+        out[writePos + k] = Math.round(out[writePos + k] * gain);
+      }
+    }
+
+    writePos += segLen;
+  }
+
+  return encodePcm16MonoWav(out, sampleRate);
+}
+
+/**
  * Splits audio longer than `maxChunkSec` at the lowest-energy 150 ms valley
  * between `minChunkSec` and `maxChunkSec` recursively, with `overlapMs` overlap
  * so words at chunk boundaries are not chopped.
  */
 export function splitWavIntoChunks(
   wavBuf: Buffer,
-  maxChunkSec = 28,
-  minChunkSec = 16,
+  maxChunkSec = DEFAULT_MAX_CHUNK_SEC,
+  minChunkSec = DEFAULT_MIN_CHUNK_SEC,
   overlapMs = 380
 ): Buffer[] {
   const { sampleRate, samples } = decodeMonoWavSamples(wavBuf);

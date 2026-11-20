@@ -1,8 +1,9 @@
 import { RECORDING_SAMPLE_RATE } from '@shared/defaults';
-import type { AudioDeviceOption } from '@shared/types';
+import type { AudioDeviceOption, MicProfile } from '@shared/types';
 
 export interface MicCaptureResult {
   wavBuffer: Uint8Array;
+  opusBuffer?: Uint8Array;
   durationMs: number;
   speechDurationMs: number;
   peakLevel: number;
@@ -128,11 +129,15 @@ export async function enumerateAudioInputs(): Promise<AudioDeviceOption[]> {
   }
 }
 
-function createAudioConstraints(deviceId?: string): MediaStreamConstraints {
+export function createAudioConstraints(
+  deviceId?: string,
+  micProfile: MicProfile = 'quiet',
+): MediaStreamConstraints {
+  const isNoisy = micProfile === 'noisy';
   const audio: MediaTrackConstraints = {
     channelCount: 1,
-    echoCancellation: true,
-    noiseSuppression: true,
+    echoCancellation: isNoisy,
+    noiseSuppression: isNoisy,
     autoGainControl: true,
   };
   if (deviceId && deviceId !== 'default') {
@@ -162,13 +167,16 @@ function mapMediaError(err: unknown): Error {
   return err instanceof Error ? err : new Error('Microphone access failed');
 }
 
-async function openMicStream(deviceId?: string): Promise<MediaStream> {
+async function openMicStream(
+  deviceId?: string,
+  micProfile: MicProfile = 'quiet',
+): Promise<MediaStream> {
   if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
     throw new Error('Microphone API is unavailable in this environment');
   }
 
   try {
-    return await navigator.mediaDevices.getUserMedia(createAudioConstraints(deviceId));
+    return await navigator.mediaDevices.getUserMedia(createAudioConstraints(deviceId, micProfile));
   } catch (err) {
     const name = getMediaErrorName(err);
     const canFallbackToDefault =
@@ -180,15 +188,7 @@ async function openMicStream(deviceId?: string): Promise<MediaStream> {
     }
 
     try {
-      return await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-        video: false,
-      });
+      return await navigator.mediaDevices.getUserMedia(createAudioConstraints('default', micProfile));
     } catch (fallbackErr) {
       throw mapMediaError(fallbackErr);
     }
@@ -384,6 +384,7 @@ function computeCenterSymmetricBars(
 
 interface WarmMicPipeline {
   deviceId: string;
+  micProfile: MicProfile;
   deviceLabel: string;
   stream: MediaStream;
   track: MediaStreamTrack | undefined;
@@ -416,21 +417,26 @@ function normalizeDeviceId(deviceId?: string): string {
   return deviceId && deviceId.trim().length > 0 ? deviceId : 'default';
 }
 
-function isPipelineAlive(pipeline: WarmMicPipeline | null, deviceId?: string): boolean {
+function isPipelineAlive(
+  pipeline: WarmMicPipeline | null,
+  deviceId?: string,
+  micProfile?: MicProfile,
+): boolean {
   if (!pipeline || pipeline.disposed) return false;
   if (deviceId !== undefined && pipeline.deviceId !== normalizeDeviceId(deviceId)) return false;
+  if (micProfile !== undefined && pipeline.micProfile !== micProfile) return false;
   if (pipeline.ctx.state === 'closed') return false;
   const track = pipeline.track;
   if (!track || track.readyState !== 'live') return false;
   return true;
 }
 
-export function isWarmMicHealthy(deviceId?: string): boolean {
-  return isPipelineAlive(warmPipeline, deviceId);
+export function isWarmMicHealthy(deviceId?: string, micProfile?: MicProfile): boolean {
+  return isPipelineAlive(warmPipeline, deviceId, micProfile);
 }
 
-async function createWarmPipeline(deviceId: string): Promise<WarmMicPipeline> {
-  const stream = await openMicStream(deviceId);
+async function createWarmPipeline(deviceId: string, micProfile: MicProfile): Promise<WarmMicPipeline> {
+  const stream = await openMicStream(deviceId, micProfile);
   const track = stream.getAudioTracks()[0];
   const deviceLabel = track?.label || 'Default Microphone';
 
@@ -465,6 +471,7 @@ async function createWarmPipeline(deviceId: string): Promise<WarmMicPipeline> {
 
     const pipeline: WarmMicPipeline = {
       deviceId,
+      micProfile,
       deviceLabel,
       stream,
       track,
@@ -618,10 +625,11 @@ async function createWarmPipeline(deviceId: string): Promise<WarmMicPipeline> {
 
 async function ensureWarmPipeline(
   deviceId?: string,
-  options?: { forceRefresh?: boolean },
+  options?: { forceRefresh?: boolean; micProfile?: MicProfile },
 ): Promise<WarmMicPipeline> {
   const targetId = normalizeDeviceId(deviceId);
-  if (!options?.forceRefresh && isPipelineAlive(warmPipeline, targetId)) {
+  const targetProfile: MicProfile = options?.micProfile ?? 'quiet';
+  if (!options?.forceRefresh && isPipelineAlive(warmPipeline, targetId, targetProfile)) {
     const existing = warmPipeline!;
     if (existing.ctx.state === 'suspended') {
       await existing.ctx.resume();
@@ -634,14 +642,14 @@ async function ensureWarmPipeline(
     warmPipeline = null;
   }
 
-  const created = await createWarmPipeline(targetId);
+  const created = await createWarmPipeline(targetId, targetProfile);
   warmPipeline = created;
   return created;
 }
 
 export async function warmMic(
   deviceId?: string,
-  options?: { forceRefresh?: boolean },
+  options?: { forceRefresh?: boolean; micProfile?: MicProfile },
 ): Promise<void> {
   await serializeWarmOp(async () => {
     await ensureWarmPipeline(deviceId, options);
@@ -657,13 +665,120 @@ export async function disposeWarmMic(): Promise<void> {
   });
 }
 
+interface OpusRecorderHandle {
+  stop: () => Promise<Uint8Array | undefined>;
+  cancel: () => void;
+}
+
+const OPUS_MIME_CANDIDATES = ['audio/webm;codecs=opus', 'audio/webm'] as const;
+const OPUS_BITS_PER_SECOND = 64000;
+const OPUS_STOP_TIMEOUT_MS = 600;
+
+function startOpusRecorder(stream: MediaStream): OpusRecorderHandle | null {
+  if (typeof MediaRecorder === 'undefined') {
+    return null;
+  }
+
+  try {
+    let mimeType: string | undefined;
+    if (typeof MediaRecorder.isTypeSupported === 'function') {
+      mimeType = OPUS_MIME_CANDIDATES.find((m) => MediaRecorder.isTypeSupported(m));
+      if (!mimeType) {
+        return null;
+      }
+    } else {
+      mimeType = 'audio/webm;codecs=opus';
+    }
+
+    const recorder = new MediaRecorder(stream, {
+      mimeType,
+      audioBitsPerSecond: OPUS_BITS_PER_SECOND,
+    });
+
+    const chunks: Blob[] = [];
+    let cancelled = false;
+
+    recorder.ondataavailable = (ev: BlobEvent) => {
+      if (!cancelled && ev.data && ev.data.size > 0) {
+        chunks.push(ev.data);
+      }
+    };
+
+    recorder.start(250);
+
+    return {
+      stop: () =>
+        new Promise<Uint8Array | undefined>((resolve) => {
+          if (cancelled) {
+            resolve(undefined);
+            return;
+          }
+
+          const finalize = async () => {
+            if (cancelled || chunks.length === 0) {
+              resolve(undefined);
+              return;
+            }
+            try {
+              const blob = new Blob(chunks, {
+                type: recorder.mimeType || mimeType || 'audio/webm;codecs=opus',
+              });
+              const ab = await blob.arrayBuffer();
+              resolve(ab.byteLength > 0 ? new Uint8Array(ab) : undefined);
+            } catch {
+              resolve(undefined);
+            }
+          };
+
+          if (recorder.state === 'inactive') {
+            void finalize();
+            return;
+          }
+
+          let settled = false;
+          const done = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            void finalize();
+          };
+
+          const timeout = setTimeout(done, OPUS_STOP_TIMEOUT_MS);
+          recorder.onstop = done;
+          recorder.onerror = done;
+
+          try {
+            recorder.stop();
+          } catch {
+            done();
+          }
+        }),
+      cancel: () => {
+        cancelled = true;
+        chunks.length = 0;
+        try {
+          if (recorder.state !== 'inactive') {
+            recorder.stop();
+          }
+        } catch {}
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function startMicCapture(options: {
   deviceId?: string;
+  micProfile?: MicProfile;
   whisperMode?: boolean;
   onLevels?: (bars: number[]) => void;
 }): Promise<MicCaptureSession> {
-  const whisperMode = Boolean(options.whisperMode);
-  const pipeline = await serializeWarmOp(() => ensureWarmPipeline(options.deviceId));
+  const micProfile: MicProfile = options.micProfile ?? 'quiet';
+  const whisperMode = Boolean(options.whisperMode) || micProfile === 'quiet';
+  const pipeline = await serializeWarmOp(() =>
+    ensureWarmPipeline(options.deviceId, { micProfile }),
+  );
 
   const chunks: Float32Array[] = pipeline.preRoll.drain();
   let sessionClosed = false;
@@ -674,6 +789,7 @@ export async function startMicCapture(options: {
       chunks.push(chunk);
     }
   };
+  const opusRecorder = startOpusRecorder(pipeline.stream);
 
   const { analyser, ctx, deviceLabel } = pipeline;
   const freqData = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
@@ -723,6 +839,7 @@ export async function startMicCapture(options: {
       await new Promise<void>((resolve) => setTimeout(resolve, TAIL_DRAIN_MS));
       const actualSampleRate = ctx.sampleRate || RECORDING_SAMPLE_RATE;
       releaseSession();
+      const opusPromise = opusRecorder ? opusRecorder.stop() : Promise.resolve(undefined);
 
       const { pcm, peak, speechDurationMs } = resampleFloat32(
         chunks,
@@ -731,8 +848,10 @@ export async function startMicCapture(options: {
         whisperMode,
       );
       const wavBuffer = encodeWavInt16(pcm, RECORDING_SAMPLE_RATE);
+      const opusBuffer = await opusPromise;
       return {
         wavBuffer,
+        opusBuffer,
         durationMs,
         speechDurationMs,
         peakLevel: peak,
@@ -741,6 +860,7 @@ export async function startMicCapture(options: {
     },
     cancel: async () => {
       chunks.length = 0;
+      opusRecorder?.cancel();
       releaseSession();
     },
   };
@@ -750,8 +870,10 @@ export async function startMicLevelMonitor(
   deviceId: string | undefined,
   whisperMode: boolean,
   onLevel: (level: number, peakZero: boolean) => void,
+  micProfile: MicProfile = 'quiet',
 ): Promise<() => Promise<void>> {
-  const stream = await openMicStream(deviceId);
+  const effectiveWhisperMode = whisperMode || micProfile === 'quiet';
+  const stream = await openMicStream(deviceId, micProfile);
   const AudioCtx =
     window.AudioContext ||
     (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -779,7 +901,7 @@ export async function startMicLevelMonitor(
       freqData,
       timeData,
       bars,
-      whisperMode,
+      effectiveWhisperMode,
     );
     bars = nextBars;
     if (rms > 0.001) seenNonZero = true;

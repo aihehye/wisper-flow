@@ -21,6 +21,7 @@ import { applyOmarchySetup } from './platform/omarchy';
 import type { PlatformBridge } from './platform/types';
 import { SoundResolver } from './sounds/soundResolver';
 import { DictationStateMachine } from './stateMachine';
+import { CorpusStore } from './storage/corpusStore';
 import { AppDatabase } from './storage/db';
 import { AppTrayController } from './tray';
 import { createHubWindow, showAndFocusHub } from './windows/hubWindow';
@@ -296,6 +297,7 @@ async function bootstrap(): Promise<void> {
     ? path.join(app.getPath('userData'), 'flow-smoke.sqlite')
     : path.join(app.getPath('userData'), 'flow.sqlite');
   db = new AppDatabase(dbPath);
+  const corpusStore = new CorpusStore(app.getPath('userData'), db);
   const initialSettings = db.getSettings();
 
   const bundledSoundsDir = path.join(rootDir, 'assets', 'sounds');
@@ -338,6 +340,7 @@ async function bootstrap(): Promise<void> {
     platform,
     asr: asrProxy,
     db,
+    corpusStore,
     sendHudState: (payload) => {
       const enriched = { ...payload, palette: latestPalette };
       const settings = db!.getSettings();
@@ -422,6 +425,13 @@ async function bootstrap(): Promise<void> {
         const next = db!.updateSettings({ microphoneDeviceId: deviceId });
         hubWindow?.webContents.send(IPC.EVENT_SETTINGS_CHANGED, next);
         tray?.update({ settings: next });
+        stateMachine?.refreshIdleVisibility();
+      },
+      onSelectMicProfile: (micProfile) => {
+        const next = db!.updateSettings({ micProfile });
+        hubWindow?.webContents.send(IPC.EVENT_SETTINGS_CHANGED, next);
+        tray?.update({ settings: next });
+        stateMachine?.refreshIdleVisibility();
       },
       onSelectLanguage: (language) => {
         const next = db!.updateSettings({ language });
@@ -448,6 +458,7 @@ async function bootstrap(): Promise<void> {
 
   registerIpcHandlers({
     db,
+    corpusStore,
     platform,
     getAsr: () => asrProxy!,
     switchAsrEngine: async (engine, settings) => {

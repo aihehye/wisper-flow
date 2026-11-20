@@ -9,12 +9,20 @@ export interface CorrectionWatchEvent extends CorrectionCandidate {
   appName: string;
 }
 
+export interface CorrectionWatchTextEvent {
+  historyId?: string;
+  correctedText: string;
+  appName: string;
+}
+
 export interface CorrectionWatchOptions {
   pastedText: string;
+  historyId?: string;
   targetAppName?: string;
   targetWindowTitle?: string;
   readFocusedText?: () => Promise<FocusedTextResult>;
   pollDelaysMs?: number[];
+  onCorrectedText?: (event: CorrectionWatchTextEvent) => void;
 }
 
 type FocusedTextReader = () => Promise<FocusedTextResult>;
@@ -35,19 +43,27 @@ export function setFocusedTextReader(reader: FocusedTextReader | null): void {
 interface WordToken {
   word: string;
   lower: string;
+  rawStart: number;
+  rawEnd: number;
 }
 
 const EDGE_PUNCTUATION_RE = /^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu;
 const HAS_ALNUM_RE = /[\p{L}\p{N}]/u;
 
 function tokenizeWords(text: string): WordToken[] {
-  const raw = text.trim().split(/\s+/);
   const tokens: WordToken[] = [];
-  for (const part of raw) {
-    if (!part) continue;
+  const re = /\S+/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    const part = match[0];
     const stripped = part.replace(EDGE_PUNCTUATION_RE, '');
     if (!stripped || !HAS_ALNUM_RE.test(stripped)) continue;
-    tokens.push({ word: stripped, lower: stripped.toLowerCase() });
+    tokens.push({
+      word: stripped,
+      lower: stripped.toLowerCase(),
+      rawStart: match.index,
+      rawEnd: match.index + part.length,
+    });
   }
   return tokens;
 }
@@ -270,6 +286,33 @@ export function extractCorrectionCandidates(
 }
 
 /**
+ * Extracts the corrected span corresponding to `pastedText` inside `editedText`
+ * with original punctuation and casing preserved.
+ */
+export function extractCorrectedFullText(pastedText: string, editedText: string): string | null {
+  if (!pastedText || !editedText || pastedText === editedText) return null;
+  const pTokens = tokenizeWords(pastedText);
+  const eTokens = tokenizeWords(editedText);
+  if (pTokens.length === 0 || eTokens.length === 0) return null;
+
+  const region = locateRegion(pTokens, eTokens);
+  if (!region || region.length === 0) {
+    if (
+      pTokens.length <= MAX_CHANGED_WORDS &&
+      eTokens.length <= MAX_CHANGED_WORDS
+    ) {
+      return editedText.trim() || null;
+    }
+    return null;
+  }
+
+  const start = region[0].rawStart;
+  const end = region[region.length - 1].rawEnd;
+  const slice = editedText.slice(start, end).trim();
+  return slice || null;
+}
+
+/**
  * Polls the focused UI control on Windows after pasting to detect manual user
  * corrections and emit candidate dictionary entries.
  * Cancels any prior active watch when called again.
@@ -353,7 +396,15 @@ export function scheduleCorrectionWatch(
           const candidates = extractCorrectionCandidates(opts.pastedText, res.text);
           if (candidates.length > 0) {
             const appName = res.processName || opts.targetAppName || '';
+            const correctedText = extractCorrectedFullText(opts.pastedText, res.text);
             cancel();
+            if (correctedText) {
+              opts.onCorrectedText?.({
+                historyId: opts.historyId,
+                correctedText,
+                appName,
+              });
+            }
             for (const c of candidates) {
               onCandidate({
                 phrase: c.phrase,

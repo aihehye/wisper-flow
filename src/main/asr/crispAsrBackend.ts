@@ -12,7 +12,14 @@ import {
   killProcessTree,
   parseDeviceListOutput,
 } from './llamaServerBackend';
-import { splitWavIntoChunks, trimSilenceWav } from './wavUtils';
+import {
+  compactInternalSilenceWav,
+  DEFAULT_MAX_CHUNK_SEC,
+  DEFAULT_MIN_CHUNK_SEC,
+  getSilenceRmsThreshold,
+  splitWavIntoChunks,
+  trimSilenceWav,
+} from './wavUtils';
 
 const execFileAsync = promisify(execFile);
 
@@ -300,8 +307,10 @@ export class CrispAsrBackend implements AsrBackend {
     }
 
     const t0 = performance.now();
-    const trimmed = trimSilenceWav(req.wavBuffer);
-    const chunks = splitWavIntoChunks(trimmed, 28, 16);
+    const rmsThreshold = getSilenceRmsThreshold(req.micProfile ?? 'quiet');
+    const trimmed = trimSilenceWav(req.wavBuffer, 80, 110, rmsThreshold);
+    const compacted = compactInternalSilenceWav(trimmed, { rmsThreshold });
+    const chunks = splitWavIntoChunks(compacted, DEFAULT_MAX_CHUNK_SEC, DEFAULT_MIN_CHUNK_SEC);
 
     const texts: string[] = [];
     let detectedLanguage: string | undefined;

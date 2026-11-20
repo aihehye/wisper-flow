@@ -11,6 +11,7 @@ import type {
   DictionaryEntry,
   DockPosition,
   HistoryEntry,
+  MicProfile,
   ModelStatus,
   OmarchyPalette,
   RegexRuleEntry,
@@ -25,6 +26,7 @@ import { runTextPipeline } from './pipeline/textPipeline';
 import type { PlatformBridge } from './platform/types';
 import type { SoundResolver } from './sounds/soundResolver';
 import type { DictationStateMachine } from './stateMachine';
+import type { CorpusStore } from './storage/corpusStore';
 import type { AppDatabase } from './storage/db';
 import { computeUsageStats, getTokenUsageStats } from './storage/stats';
 import type { AppTrayController } from './tray';
@@ -43,6 +45,7 @@ const execFileAsync = promisify(execFile);
 
 export interface AppRuntimeContext {
   db: AppDatabase;
+  corpusStore?: CorpusStore;
   platform: PlatformBridge;
   getAsr: () => AsrBackend;
   switchAsrEngine: (engine: 'llama-server' | 'crispasr', settings: AppSettings) => Promise<void>;
@@ -269,6 +272,35 @@ export function registerIpcHandlers(ctx: AppRuntimeContext): void {
     const entry = all.find((h) => h.id === id);
     if (!entry) return;
     await ctx.platform.copyText(entry.pastedText);
+  });
+  ipcMain.handle(
+    IPC.HISTORY_SET_CORRECTED_TEXT,
+    (_event, id: string, correctedText: string | null) => {
+      ctx.db.setHistoryCorrectedText(id, correctedText);
+    }
+  );
+  ipcMain.handle(IPC.CORPUS_STATS, async () => {
+    return ctx.corpusStore ? ctx.corpusStore.getStats() : null;
+  });
+  ipcMain.handle(IPC.CORPUS_EXPORT, async (_event, outputDir?: string) => {
+    if (!ctx.corpusStore) return null;
+    let targetDir = outputDir?.trim();
+    if (!targetDir) {
+      const hub = ctx.getHubWindow();
+      const dialogOpts: Electron.OpenDialogOptions = {
+        title: 'Export Speech Corpus for Colab',
+        properties: ['openDirectory', 'createDirectory'],
+      };
+      const res =
+        hub && !hub.isDestroyed()
+          ? await dialog.showOpenDialog(hub, dialogOpts)
+          : await dialog.showOpenDialog(dialogOpts);
+      if (res.canceled || res.filePaths.length === 0) {
+        return null;
+      }
+      targetDir = res.filePaths[0];
+    }
+    return ctx.corpusStore.exportColabDataset(targetDir);
   });
   ipcMain.handle(IPC.STATS_GET, () => computeUsageStats(ctx.db.listHistory({ includeArchived: true })));
   ipcMain.handle(IPC.TOKEN_STATS_GET, () =>
@@ -497,6 +529,13 @@ export function registerIpcHandlers(ctx: AppRuntimeContext): void {
           await applySettingsSideEffects(prev, next);
         }
         break;
+      case 'set-mic-profile':
+        if (action.value === 'quiet' || action.value === 'noisy') {
+          const prev = ctx.db.getSettings();
+          const next = ctx.db.updateSettings({ micProfile: action.value as MicProfile });
+          await applySettingsSideEffects(prev, next);
+        }
+        break;
       case 'set-language':
         if (typeof action.value === 'string') {
           const prev = ctx.db.getSettings();
@@ -509,6 +548,10 @@ export function registerIpcHandlers(ctx: AppRuntimeContext): void {
 
   ipcMain.handle(IPC.HUD_AUDIO_SUBMIT, async (_event, payload: HudAudioSubmitPayload) => {
     const wavBuffer = Buffer.from(payload.wavBuffer);
+    const opusBuffer =
+      payload.opusBuffer && payload.opusBuffer.byteLength > 0
+        ? Buffer.from(payload.opusBuffer)
+        : undefined;
     const stats = wavBuffer.length >= 44 ? computeWavStats(wavBuffer) : null;
     const isSilent =
       Boolean(payload.error) ||
@@ -519,6 +562,7 @@ export function registerIpcHandlers(ctx: AppRuntimeContext): void {
     await ctx.stateMachine.handleAudioSubmitted({
       sessionId: payload.sessionId,
       wavBuffer,
+      opusBuffer,
       speechDurationMs: payload.speechDurationMs || stats?.durationMs || 0,
       totalDurationMs: payload.durationMs || stats?.durationMs || 0,
       isSilent,
@@ -570,6 +614,24 @@ export function registerIpcHandlers(ctx: AppRuntimeContext): void {
               },
             })),
         ],
+      },
+      {
+        label: 'Mic Environment',
+        submenu: (
+          [
+            { value: 'quiet' as MicProfile, label: 'Quiet Room (Whisper)' },
+            { value: 'noisy' as MicProfile, label: 'Outside (Noisy)' },
+          ] as const
+        ).map((item) => ({
+          label: item.label,
+          type: 'radio' as const,
+          checked: settings.micProfile === item.value,
+          click: () => {
+            const prev = ctx.db.getSettings();
+            const next = ctx.db.updateSettings({ micProfile: item.value });
+            void applySettingsSideEffects(prev, next);
+          },
+        })),
       },
       {
         label: 'Language',
