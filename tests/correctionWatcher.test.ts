@@ -115,7 +115,7 @@ describe('extractCorrectionCandidates', () => {
 });
 
 describe('scheduleCorrectionWatch', () => {
-  it('emits candidates on poll and stops watching once captured', async () => {
+  it('emits candidates once text settles across two consecutive polls and stops watching', async () => {
     let pollCount = 0;
     const emitted: Array<{ phrase: string; replacement: string; appName: string }> = [];
 
@@ -123,7 +123,7 @@ describe('scheduleCorrectionWatch', () => {
       {
         pastedText: 'I use whisper flow daily',
         targetAppName: 'code.exe',
-        pollDelaysMs: [15, 45, 80],
+        pollDelaysMs: [15, 35, 55, 80],
         readFocusedText: async () => {
           pollCount++;
           if (pollCount === 1) {
@@ -136,7 +136,38 @@ describe('scheduleCorrectionWatch', () => {
     );
 
     await new Promise((r) => setTimeout(r, 120));
-    assert.equal(pollCount, 2);
+    assert.equal(pollCount, 3);
+    assert.deepEqual(emitted, [
+      { phrase: 'whisper flow', replacement: 'Wisper Flow', appName: 'code.exe' },
+    ]);
+  });
+
+  it('ignores mid-typing edits until text settles across two consecutive polls', async () => {
+    let pollCount = 0;
+    const emitted: Array<{ phrase: string; replacement: string; appName: string }> = [];
+    const snapshots = [
+      'I use whisper flow daily',
+      'I use Wis daily',
+      'I use Wisper Flow daily',
+      'I use Wisper Flow daily',
+    ];
+
+    scheduleCorrectionWatch(
+      {
+        pastedText: 'I use whisper flow daily',
+        targetAppName: 'code.exe',
+        pollDelaysMs: [10, 30, 50, 70, 95],
+        readFocusedText: async () => {
+          const text = snapshots[Math.min(pollCount, snapshots.length - 1)];
+          pollCount++;
+          return { ok: true, text, processName: 'code.exe' };
+        },
+      },
+      (c) => emitted.push(c)
+    );
+
+    await new Promise((r) => setTimeout(r, 130));
+    assert.equal(pollCount, 4);
     assert.deepEqual(emitted, [
       { phrase: 'whisper flow', replacement: 'Wisper Flow', appName: 'code.exe' },
     ]);

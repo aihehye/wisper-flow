@@ -1413,3 +1413,22 @@
   padding: 1px 6px;
   font-size: 11px;
 }
+
+/* Fix & Teach inline editor */
+.fix-teach-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 2px;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+}
+
+.fix-teach-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}

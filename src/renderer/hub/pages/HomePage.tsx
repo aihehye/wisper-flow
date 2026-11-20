@@ -45,6 +45,79 @@ function formatTimestamp(iso: string): string {
   return `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${timeStr}`;
 }
 
+const EDGE_PUNCTUATION_RE = /^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu;
+const HAS_ALNUM_RE = /[\p{L}\p{N}]/u;
+const MAX_FIX_WORDS = 3;
+
+function tokenizeWords(text: string): string[] {
+  const tokens: string[] = [];
+  for (const part of text.trim().split(/\s+/)) {
+    if (!part) continue;
+    const stripped = part.replace(EDGE_PUNCTUATION_RE, '');
+    if (stripped && HAS_ALNUM_RE.test(stripped)) tokens.push(stripped);
+  }
+  return tokens;
+}
+
+function extractWordCorrections(
+  originalText: string,
+  editedText: string,
+): Array<{ phrase: string; replacement: string }> {
+  const a = tokenizeWords(originalText);
+  const b = tokenizeWords(editedText);
+  const m = a.length;
+  const n = b.length;
+  if (m === 0 || n === 0 || m * n > 2_000_000) return [];
+
+  const stride = n + 1;
+  const dp = new Uint16Array((m + 1) * stride);
+  for (let i = m - 1; i >= 0; i--) {
+    const row = i * stride;
+    const nextRow = (i + 1) * stride;
+    for (let j = n - 1; j >= 0; j--) {
+      if (a[i] === b[j]) {
+        dp[row + j] = dp[nextRow + j + 1] + 1;
+      } else {
+        dp[row + j] = dp[nextRow + j] >= dp[row + j + 1] ? dp[nextRow + j] : dp[row + j + 1];
+      }
+    }
+  }
+
+  const pairs: Array<[number, number]> = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (a[i] === b[j]) {
+      pairs.push([i, j]);
+      i++;
+      j++;
+    } else if (dp[(i + 1) * stride + j] >= dp[i * stride + j + 1]) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+  pairs.push([m, n]);
+
+  const diffs: Array<{ phrase: string; replacement: string }> = [];
+  let prevA = -1;
+  let prevB = -1;
+  for (const [curA, curB] of pairs) {
+    const aLen = curA - prevA - 1;
+    const bLen = curB - prevB - 1;
+    if (aLen >= 1 && aLen <= MAX_FIX_WORDS && bLen >= 1 && bLen <= MAX_FIX_WORDS) {
+      const phrase = a.slice(prevA + 1, curA).join(' ');
+      const replacement = b.slice(prevB + 1, curB).join(' ');
+      if (phrase && replacement && phrase !== replacement) {
+        diffs.push({ phrase, replacement });
+      }
+    }
+    prevA = curA;
+    prevB = curB;
+  }
+  return diffs;
+}
+
 export const HomePage: React.FC<HomePageProps> = ({
   stats,
   settings,
@@ -58,11 +131,11 @@ export const HomePage: React.FC<HomePageProps> = ({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [quickFixEntryId, setQuickFixEntryId] = useState<string | null>(null);
-  const [quickFixPhrase, setQuickFixPhrase] = useState('');
-  const [quickFixReplacement, setQuickFixReplacement] = useState('');
+  const [quickFixOriginal, setQuickFixOriginal] = useState('');
+  const [quickFixText, setQuickFixText] = useState('');
   const [quickFixSaving, setQuickFixSaving] = useState(false);
-  const [quickFixSavedId, setQuickFixSavedId] = useState<string | null>(null);
-  const [quickFixError, setQuickFixError] = useState<string | null>(null);
+  const [quickFixSaved, setQuickFixSaved] = useState<{ id: string; label: string } | null>(null);
+  const [quickFixHint, setQuickFixHint] = useState<string | null>(null);
 
   const loadHistory = useCallback(async (query: string) => {
     try {
@@ -136,50 +209,58 @@ export const HomePage: React.FC<HomePageProps> = ({
 
   const closeQuickFix = () => {
     setQuickFixEntryId(null);
-    setQuickFixPhrase('');
-    setQuickFixReplacement('');
-    setQuickFixError(null);
+    setQuickFixOriginal('');
+    setQuickFixText('');
+    setQuickFixHint(null);
   };
 
-  const openQuickFix = (entryId: string) => {
-    if (quickFixEntryId === entryId) {
+  const openQuickFix = (entry: HistoryEntry) => {
+    if (quickFixEntryId === entry.id) {
       closeQuickFix();
       return;
     }
-    const selected = window.getSelection()?.toString().trim() ?? '';
-    const prefill = selected && !selected.includes('\n') && selected.length <= 80 ? selected : '';
-    setQuickFixEntryId(entryId);
-    setQuickFixPhrase(prefill);
-    setQuickFixReplacement('');
-    setQuickFixError(null);
+    const baseText = entry.pastedText || entry.formattedText || entry.asrText;
+    setQuickFixEntryId(entry.id);
+    setQuickFixOriginal(baseText);
+    setQuickFixText(baseText);
+    setQuickFixHint(null);
   };
 
   const handleQuickFixSubmit = async (e: React.FormEvent, entryId: string) => {
     e.preventDefault();
-    const phrase = quickFixPhrase.trim();
-    const replacement = quickFixReplacement.trim();
-    if (!phrase || !replacement) return;
+    const diffs = extractWordCorrections(quickFixOriginal, quickFixText);
+    if (diffs.length === 0) {
+      setQuickFixHint('Edit 1–3 words in the text above to save a dictionary rule.');
+      return;
+    }
 
     setQuickFixSaving(true);
-    setQuickFixError(null);
+    setQuickFixHint(null);
     try {
       const existingList = await window.wisperHub?.listDictionary();
-      const existing = existingList?.find(
-        (d) => d.phrase.trim().toLowerCase() === phrase.toLowerCase(),
-      );
-      await window.wisperHub?.upsertDictionary({
-        id: existing?.id,
-        phrase,
-        replacement,
-        enabled: true,
-      });
+      for (const diff of diffs) {
+        const existing = existingList?.find(
+          (d) => d.phrase.trim().toLowerCase() === diff.phrase.toLowerCase(),
+        );
+        await window.wisperHub?.upsertDictionary({
+          id: existing?.id,
+          phrase: diff.phrase,
+          replacement: diff.replacement,
+          enabled: true,
+        });
+      }
+      const first = diffs[0];
+      const label =
+        diffs.length === 1
+          ? `Saved: "${first.phrase}" → "${first.replacement}"`
+          : `Saved ${diffs.length} rules ("${first.phrase}" → "${first.replacement}")`;
       closeQuickFix();
-      setQuickFixSavedId(entryId);
+      setQuickFixSaved({ id: entryId, label });
       window.setTimeout(() => {
-        setQuickFixSavedId((cur) => (cur === entryId ? null : cur));
-      }, 2500);
+        setQuickFixSaved((cur) => (cur?.id === entryId ? null : cur));
+      }, 3500);
     } catch {
-      setQuickFixError('Failed to save rule');
+      setQuickFixHint('Failed to save rule to dictionary.');
     } finally {
       setQuickFixSaving(false);
     }
@@ -320,21 +401,21 @@ export const HomePage: React.FC<HomePageProps> = ({
                   </div>
 
                   <div className="history-actions">
-                    {quickFixSavedId === entry.id && (
+                    {quickFixSaved?.id === entry.id && (
                       <span className="chip success">
                         <Check size={12} />
-                        <span>Added to Dictionary</span>
+                        <span>{quickFixSaved.label}</span>
                       </span>
                     )}
 
                     <button
                       type="button"
                       className="btn btn-sm"
-                      title="Turn a misheard word into an auto-correction rule"
-                      onClick={() => openQuickFix(entry.id)}
+                      title="Edit 1–3 words to teach Wisper Flow a dictionary correction"
+                      onClick={() => openQuickFix(entry)}
                     >
                       <Pencil size={12} />
-                      <span>Fix Word</span>
+                      <span>Fix &amp; Teach</span>
                     </button>
 
                     {hasRawDiff && (
@@ -395,50 +476,33 @@ export const HomePage: React.FC<HomePageProps> = ({
 
                 {quickFixEntryId === entry.id && (
                   <form
-                    className="quick-fix-row"
+                    className="fix-teach-box"
                     onSubmit={(e) => void handleQuickFixSubmit(e, entry.id)}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      flexWrap: 'wrap',
-                      marginTop: 2,
-                      padding: '9px 11px',
-                      borderRadius: 8,
-                      background: 'var(--bg-elevated)',
-                      border: '1px solid var(--border)',
-                    }}
                   >
                     <input
                       type="text"
                       className="input"
-                      style={{ flex: 1, minWidth: 150 }}
-                      placeholder="Misheard phrase…"
-                      value={quickFixPhrase}
-                      onChange={(e) => setQuickFixPhrase(e.target.value)}
+                      value={quickFixText}
+                      onChange={(e) => {
+                        setQuickFixText(e.target.value);
+                        if (quickFixHint) setQuickFixHint(null);
+                      }}
+                      placeholder="Edit 1–3 misheard words…"
                       autoFocus
                     />
-                    <input
-                      type="text"
-                      className="input"
-                      style={{ flex: 1, minWidth: 150 }}
-                      placeholder="Correct replacement…"
-                      value={quickFixReplacement}
-                      onChange={(e) => setQuickFixReplacement(e.target.value)}
-                    />
-                    <button
-                      type="submit"
-                      className="btn btn-primary btn-sm"
-                      disabled={
-                        quickFixSaving || !quickFixPhrase.trim() || !quickFixReplacement.trim()
-                      }
-                    >
-                      Add to Dictionary
-                    </button>
-                    <button type="button" className="btn btn-sm" onClick={closeQuickFix}>
-                      Cancel
-                    </button>
-                    {quickFixError && <span className="chip danger">{quickFixError}</span>}
+                    <div className="fix-teach-actions">
+                      <button
+                        type="submit"
+                        className="btn btn-primary btn-sm"
+                        disabled={quickFixSaving || !quickFixText.trim()}
+                      >
+                        Save to Dictionary
+                      </button>
+                      <button type="button" className="btn btn-sm" onClick={closeQuickFix}>
+                        Cancel
+                      </button>
+                      {quickFixHint && <span className="chip warning">{quickFixHint}</span>}
+                    </div>
                   </form>
                 )}
               </article>

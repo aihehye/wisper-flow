@@ -22,7 +22,7 @@ type FocusedTextReader = () => Promise<FocusedTextResult>;
 let registeredReader: FocusedTextReader | null = null;
 let activeWatchCancel: (() => void) | null = null;
 
-const DEFAULT_POLL_DELAYS_MS = [2500, 6000, 11000];
+const DEFAULT_POLL_DELAYS_MS = [3000, 5000, 7000, 9000, 11000];
 const MAX_CHANGED_WORDS = 3;
 
 /**
@@ -294,6 +294,7 @@ export function scheduleCorrectionWatch(
   const delays = opts.pollDelaysMs?.length ? opts.pollDelaysMs : DEFAULT_POLL_DELAYS_MS;
   let cancelled = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let lastText: string | null = null;
   const startedAt = Date.now();
 
   const cancel = () => {
@@ -346,18 +347,22 @@ export function scheduleCorrectionWatch(
       }
 
       if (res.ok && typeof res.text === 'string') {
-        const candidates = extractCorrectionCandidates(opts.pastedText, res.text);
-        if (candidates.length > 0) {
-          const appName = res.processName || opts.targetAppName || '';
-          cancel();
-          for (const c of candidates) {
-            onCandidate({
-              phrase: c.phrase,
-              replacement: c.replacement,
-              appName,
-            });
+        if (lastText === null || res.text !== lastText) {
+          lastText = res.text;
+        } else {
+          const candidates = extractCorrectionCandidates(opts.pastedText, res.text);
+          if (candidates.length > 0) {
+            const appName = res.processName || opts.targetAppName || '';
+            cancel();
+            for (const c of candidates) {
+              onCandidate({
+                phrase: c.phrase,
+                replacement: c.replacement,
+                appName,
+              });
+            }
+            return;
           }
-          return;
         }
       }
 

@@ -63,6 +63,7 @@ export class DictationStateMachine {
   private warnTimer: ReturnType<typeof setTimeout> | null = null;
   private stopTimer: ReturnType<typeof setTimeout> | null = null;
   private errorResetTimer: ReturnType<typeof setTimeout> | null = null;
+  private suggestionToastTimer: ReturnType<typeof setTimeout> | null = null;
   private audioMutedByUs = false;
   private mediaPausedByUs = false;
   private muteChain: Promise<void> = Promise.resolve();
@@ -116,6 +117,13 @@ export class DictationStateMachine {
     if (this.errorResetTimer) {
       clearTimeout(this.errorResetTimer);
       this.errorResetTimer = null;
+    }
+  }
+
+  private clearSuggestionToastTimer(): void {
+    if (this.suggestionToastTimer) {
+      clearTimeout(this.suggestionToastTimer);
+      this.suggestionToastTimer = null;
     }
   }
 
@@ -173,6 +181,7 @@ export class DictationStateMachine {
 
   private async startRecordingSession(mode: 'active_ptt' | 'active_popo'): Promise<void> {
     this.clearErrorResetTimer();
+    this.clearSuggestionToastTimer();
     this.clearSessionTimers();
 
     const settings = this.deps.getSettings();
@@ -588,6 +597,16 @@ export class DictationStateMachine {
         });
         if (created) {
           this.deps.onSuggestionsUpdated?.();
+          this.clearSuggestionToastTimer();
+          this.emitHudState({
+            message: `Suggested: "${candidate.phrase}" → "${candidate.replacement}"`,
+            kind: 'info',
+          });
+          this.suggestionToastTimer = setTimeout(() => {
+            this.suggestionToastTimer = null;
+            if (this.disposed || !this.isIdleState()) return;
+            this.emitHudState();
+          }, 3500);
         }
       }
     );
@@ -664,6 +683,7 @@ export class DictationStateMachine {
     this.disposed = true;
     this.clearSessionTimers();
     this.clearErrorResetTimer();
+    this.clearSuggestionToastTimer();
     this.sessionId = null;
     if (this.audioMutedByUs) {
       this.audioMutedByUs = false;
