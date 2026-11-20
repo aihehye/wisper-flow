@@ -4,7 +4,7 @@ import { execFile, spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { GpuDeviceInfo, ModelStatus } from '../../shared/types';
-import type { AsrBackend, TranscribeRequest, TranscribeResult } from './types';
+import type { AsrBackend, TokenUsage, TranscribeRequest, TranscribeResult } from './types';
 import { getLlamaServerBinaryPath, getModelPaths } from './modelManager';
 import { encodePcm16MonoWav, splitWavIntoChunks, trimSilenceWav } from './wavUtils';
 
@@ -528,18 +528,28 @@ export class LlamaServerBackend implements AsrBackend {
 
     const texts: string[] = [];
     let detectedLanguage: string | undefined;
+    let promptTokens = 0;
+    let completionTokens = 0;
+    let totalTokens = 0;
+    let hasMeasuredUsage = false;
 
     for (const chunk of chunks) {
-      const { text, detectedLanguage: chunkLang } = await this.sendChunkToServer(
-        this.baseUrl,
-        chunk,
-        req
-      );
+      const {
+        text,
+        detectedLanguage: chunkLang,
+        usage,
+      } = await this.sendChunkToServer(this.baseUrl, chunk, req);
       if (!detectedLanguage && chunkLang) {
         detectedLanguage = chunkLang;
       }
       if (text) {
         texts.push(text);
+      }
+      if (usage) {
+        hasMeasuredUsage = true;
+        promptTokens += usage.promptTokens;
+        completionTokens += usage.completionTokens;
+        totalTokens += usage.totalTokens;
       }
     }
 
@@ -548,6 +558,16 @@ export class LlamaServerBackend implements AsrBackend {
       rawText: joinChunkTranscripts(texts),
       detectedLanguage,
       asrLatencyMs,
+      ...(hasMeasuredUsage
+        ? {
+            usage: {
+              promptTokens,
+              completionTokens,
+              totalTokens,
+              estimated: false,
+            },
+          }
+        : {}),
     };
   }
 
@@ -555,7 +575,7 @@ export class LlamaServerBackend implements AsrBackend {
     baseUrl: string,
     chunkWav: Buffer,
     req: TranscribeRequest
-  ): Promise<{ text: string; detectedLanguage?: string }> {
+  ): Promise<{ text: string; detectedLanguage?: string; usage?: TokenUsage }> {
     const messages: Array<Record<string, unknown>> = [];
 
     if (req.contextHints && req.contextHints.length > 0) {
@@ -611,8 +631,28 @@ export class LlamaServerBackend implements AsrBackend {
 
     const data = (await res.json()) as {
       choices?: Array<{ message?: { content?: string | null } }>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+      };
     };
     const rawContent = data.choices?.[0]?.message?.content ?? '';
-    return cleanRumbleOutput(rawContent);
+    const cleaned = cleanRumbleOutput(rawContent);
+
+    let usage: TokenUsage | undefined;
+    if (data.usage && typeof data.usage === 'object') {
+      const promptTokens = Math.max(0, Math.round(Number(data.usage.prompt_tokens) || 0));
+      const completionTokens = Math.max(0, Math.round(Number(data.usage.completion_tokens) || 0));
+      const totalTokens = Math.max(
+        promptTokens + completionTokens,
+        Math.round(Number(data.usage.total_tokens) || 0)
+      );
+      if (totalTokens > 0 || promptTokens > 0 || completionTokens > 0) {
+        usage = { promptTokens, completionTokens, totalTokens, estimated: false };
+      }
+    }
+
+    return usage ? { ...cleaned, usage } : cleaned;
   }
 }

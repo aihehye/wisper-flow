@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   BookOpen,
+  Coins,
   Cpu,
   Home,
   Laptop,
@@ -27,7 +28,10 @@ import { HomePage } from './pages/HomePage';
 import { DictionaryPage } from './pages/DictionaryPage';
 import { SnippetsPage } from './pages/SnippetsPage';
 import { RegexRulesPage } from './pages/RegexRulesPage';
+import { TokensPage } from './pages/TokensPage';
 import { SettingsPage } from './pages/SettingsPage';
+
+type ActiveHubPage = HubPage | 'tokens';
 
 const OMARCHY_CSS_VARS = [
   '--bg',
@@ -176,7 +180,7 @@ function formatModelStateLabel(status: ModelStatus | null): string {
 }
 
 export const HubApp: React.FC = () => {
-  const [page, setPage] = useState<HubPage>('home');
+  const [page, setPage] = useState<ActiveHubPage>('home');
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
   const [settings, setSettings] = useState<AppSettings>(() => createDefaultSettings('win32'));
   const [modelStatus, setModelStatus] = useState<ModelStatus | null>(null);
@@ -301,11 +305,12 @@ export const HubApp: React.FC = () => {
     [modelStatus?.state],
   );
 
-  const navItems: Array<{ id: HubPage; label: string; icon: React.ReactNode }> = [
+  const navItems: Array<{ id: ActiveHubPage; label: string; icon: React.ReactNode }> = [
     { id: 'home', label: 'Home', icon: <Home size={16} /> },
     { id: 'dictionary', label: 'Dictionary', icon: <BookOpen size={16} /> },
     { id: 'snippets', label: 'Snippets', icon: <Zap size={16} /> },
     { id: 'regex', label: 'Regex Rules', icon: <Regex size={16} /> },
+    { id: 'tokens', label: 'Tokens', icon: <Coins size={16} /> },
     { id: 'settings', label: 'Settings', icon: <Settings size={16} /> },
   ];
 
@@ -429,6 +434,7 @@ export const HubApp: React.FC = () => {
           {page === 'dictionary' && <DictionaryPage />}
           {page === 'snippets' && <SnippetsPage />}
           {page === 'regex' && <RegexRulesPage />}
+          {page === 'tokens' && <TokensPage />}
           {page === 'settings' && (
             <SettingsPage
               activeTab={settingsTab}

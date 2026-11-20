@@ -23,6 +23,9 @@ if (!csc) {
 const src = path.join(root, 'native', 'win-helper', 'WinHelper.cs');
 const out = path.join(root, 'native', 'win-helper', 'wisper-win-helper.exe');
 
+const cscDir = path.dirname(csc);
+const wpfDir = path.join(cscDir, 'WPF');
+
 console.log('Compiling WinHelper.cs via', csc);
 execFileSync(
   csc,
@@ -37,6 +40,9 @@ execFileSync(
     '/r:System.Windows.Forms.dll',
     '/r:System.Drawing.dll',
     '/r:System.Web.Extensions.dll',
+    `/r:${path.join(wpfDir, 'UIAutomationClient.dll')}`,
+    `/r:${path.join(wpfDir, 'UIAutomationTypes.dll')}`,
+    `/r:${path.join(wpfDir, 'WindowsBase.dll')}`,
     src,
   ],
   { stdio: 'inherit' }

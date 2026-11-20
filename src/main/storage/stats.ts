@@ -1,6 +1,6 @@
 // @ts-ignore Node --experimental-strip-types requires explicit .ts extension
 import { BASELINE_TYPING_WPM } from '../../shared/defaults.ts';
-import type { HistoryEntry, UsageStats } from '../../shared/types';
+import type { HistoryEntry, TokenUsageStats, UsageStats } from '../../shared/types';
 
 function toLocalDateKey(date: Date): string {
   const year = date.getFullYear();
@@ -72,5 +72,164 @@ export function computeUsageStats(history: HistoryEntry[]): UsageStats {
     streakDays,
     timeSavedMinutes,
     todayWords,
+  };
+}
+
+function resolveEntryTokens(entry: HistoryEntry): {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  estimated: boolean;
+} {
+  const measuredTotal = Math.max(0, Math.round(entry.totalTokens ?? 0));
+  if (measuredTotal > 0) {
+    const promptTokens = Math.max(0, Math.round(entry.promptTokens ?? 0));
+    const completionTokens = Math.max(0, Math.round(entry.completionTokens ?? 0));
+    return {
+      promptTokens,
+      completionTokens,
+      totalTokens: measuredTotal,
+      estimated: Boolean(entry.tokensEstimated),
+    };
+  }
+
+  if (entry.durationSec > 0) {
+    const estTotal = Math.max(
+      1,
+      Math.round(entry.durationSec * 25 + Math.max(0, entry.numWords) * 1.3)
+    );
+    const estPrompt = Math.round(estTotal * 0.85);
+    const estCompletion = Math.max(0, estTotal - estPrompt);
+    return {
+      promptTokens: estPrompt,
+      completionTokens: estCompletion,
+      totalTokens: estTotal,
+      estimated: true,
+    };
+  }
+
+  return {
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    estimated: false,
+  };
+}
+
+export function getTokenUsageStats(history: HistoryEntry[]): TokenUsageStats {
+  const now = new Date();
+  const todayKey = toLocalDateKey(now);
+
+  const sevenDaysAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
+  const sevenDaysCutoff = toLocalDateKey(sevenDaysAgo);
+
+  const dayMap = new Map<
+    string,
+    { totalTokens: number; promptTokens: number; completionTokens: number; dictations: number }
+  >();
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+    dayMap.set(toLocalDateKey(d), {
+      totalTokens: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      dictations: 0,
+    });
+  }
+
+  const allTime = {
+    totalTokens: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    dictations: history.length,
+    measuredDictations: 0,
+  };
+  const today = { totalTokens: 0, promptTokens: 0, completionTokens: 0, dictations: 0 };
+  const last7Days = { totalTokens: 0, promptTokens: 0, completionTokens: 0, dictations: 0 };
+  const appMap = new Map<string, { totalTokens: number; dictations: number }>();
+
+  const sortedHistory = [...history].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  const recent: TokenUsageStats['recent'] = [];
+
+  for (const entry of sortedHistory) {
+    const tokens = resolveEntryTokens(entry);
+    allTime.totalTokens += tokens.totalTokens;
+    allTime.promptTokens += tokens.promptTokens;
+    allTime.completionTokens += tokens.completionTokens;
+    if (!tokens.estimated && tokens.totalTokens > 0) {
+      allTime.measuredDictations += 1;
+    }
+
+    const parsed = new Date(entry.timestamp);
+    if (!Number.isNaN(parsed.getTime())) {
+      const key = toLocalDateKey(parsed);
+      if (key === todayKey) {
+        today.totalTokens += tokens.totalTokens;
+        today.promptTokens += tokens.promptTokens;
+        today.completionTokens += tokens.completionTokens;
+        today.dictations += 1;
+      }
+      if (key >= sevenDaysCutoff) {
+        last7Days.totalTokens += tokens.totalTokens;
+        last7Days.promptTokens += tokens.promptTokens;
+        last7Days.completionTokens += tokens.completionTokens;
+        last7Days.dictations += 1;
+      }
+      const dayBucket = dayMap.get(key);
+      if (dayBucket) {
+        dayBucket.totalTokens += tokens.totalTokens;
+        dayBucket.promptTokens += tokens.promptTokens;
+        dayBucket.completionTokens += tokens.completionTokens;
+        dayBucket.dictations += 1;
+      }
+    }
+
+    const appKey = entry.appName?.trim() || 'Unknown';
+    const appAgg = appMap.get(appKey) ?? { totalTokens: 0, dictations: 0 };
+    appAgg.totalTokens += tokens.totalTokens;
+    appAgg.dictations += 1;
+    appMap.set(appKey, appAgg);
+
+    if (recent.length < 25) {
+      const text = (entry.pastedText || entry.formattedText || entry.asrText || '').trim();
+      const textPreview = text.length > 80 ? `${text.slice(0, 77)}...` : text;
+      recent.push({
+        id: entry.id,
+        timestamp: entry.timestamp,
+        appName: appKey,
+        numWords: entry.numWords,
+        promptTokens: tokens.promptTokens,
+        completionTokens: tokens.completionTokens,
+        totalTokens: tokens.totalTokens,
+        estimated: tokens.estimated,
+        textPreview,
+      });
+    }
+  }
+
+  const byApp = [...appMap.entries()]
+    .map(([appName, agg]) => ({
+      appName,
+      totalTokens: agg.totalTokens,
+      dictations: agg.dictations,
+    }))
+    .sort((a, b) => b.totalTokens - a.totalTokens)
+    .slice(0, 10);
+
+  const byDay = [...dayMap.entries()].map(([date, agg]) => ({
+    date,
+    totalTokens: agg.totalTokens,
+    promptTokens: agg.promptTokens,
+    completionTokens: agg.completionTokens,
+    dictations: agg.dictations,
+  }));
+
+  return {
+    allTime,
+    today,
+    last7Days,
+    byApp,
+    byDay,
+    recent,
   };
 }

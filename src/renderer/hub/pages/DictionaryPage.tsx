@@ -12,7 +12,7 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import type { DictionaryEntry } from '@shared/types';
+import type { DictionaryEntry, DictionarySuggestion } from '@shared/types';
 
 type DictionaryTab = 'hints' | 'replacements';
 
@@ -59,6 +59,8 @@ const STARTER_PACKS: readonly DictionaryStarterPack[] = [
 
 export const DictionaryPage: React.FC = () => {
   const [entries, setEntries] = useState<DictionaryEntry[]>([]);
+  const [suggestions, setSuggestions] = useState<DictionarySuggestion[]>([]);
+  const [busySuggestionId, setBusySuggestionId] = useState<string | null>(null);
   const [tab, setTab] = useState<DictionaryTab>('hints');
   const [search, setSearch] = useState('');
   const [phraseInput, setPhraseInput] = useState('');
@@ -89,9 +91,48 @@ export const DictionaryPage: React.FC = () => {
     } catch {}
   }, []);
 
+  const loadSuggestions = useCallback(async () => {
+    try {
+      const list = await window.wisperHub?.listDictionarySuggestions();
+      if (Array.isArray(list)) setSuggestions(list);
+    } catch {}
+  }, []);
+
   useEffect(() => {
     void loadEntries();
-  }, [loadEntries]);
+    void loadSuggestions();
+    const unsub = window.wisperHub?.onSuggestionsUpdated(() => {
+      void loadSuggestions();
+    });
+    return () => unsub?.();
+  }, [loadEntries, loadSuggestions]);
+
+  const handleAcceptSuggestion = async (suggestion: DictionarySuggestion) => {
+    setBusySuggestionId(suggestion.id);
+    setSuggestions((prev) => prev.filter((item) => item.id !== suggestion.id));
+    try {
+      await window.wisperHub?.acceptDictionarySuggestion(suggestion.id);
+      await loadEntries();
+      showStatus(`Added "${suggestion.phrase}" → "${suggestion.replacement}".`);
+    } catch {
+      await loadSuggestions();
+      showStatus('Failed to add suggestion.', 'danger');
+    } finally {
+      setBusySuggestionId(null);
+    }
+  };
+
+  const handleDismissSuggestion = async (suggestionId: string) => {
+    setBusySuggestionId(suggestionId);
+    setSuggestions((prev) => prev.filter((item) => item.id !== suggestionId));
+    try {
+      await window.wisperHub?.dismissDictionarySuggestion(suggestionId);
+    } catch {
+      await loadSuggestions();
+    } finally {
+      setBusySuggestionId(null);
+    }
+  };
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -378,6 +419,55 @@ export const DictionaryPage: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {suggestions.length > 0 && (
+        <section className="card suggestions-card" aria-label="Suggested from your recent edits">
+          <div className="suggestions-header">
+            <span className="suggestions-title">
+              <Sparkles size={14} style={{ color: 'var(--accent)' }} />
+              <span>Suggested from your recent edits</span>
+            </span>
+            <span className="chip accent">{suggestions.length}</span>
+          </div>
+          <div className="suggestions-list">
+            {suggestions.map((suggestion) => {
+              const isBusy = busySuggestionId === suggestion.id;
+              return (
+                <div key={suggestion.id} className="suggestion-row">
+                  <div className="suggestion-main">
+                    <span className="suggestion-phrase">&ldquo;{suggestion.phrase}&rdquo;</span>
+                    <ArrowRight size={13} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+                    <span className="suggestion-replacement">
+                      &ldquo;{suggestion.replacement}&rdquo;
+                    </span>
+                    {suggestion.appName && <span className="chip">{suggestion.appName}</span>}
+                  </div>
+                  <div className="suggestion-actions">
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm"
+                      disabled={isBusy}
+                      onClick={() => void handleAcceptSuggestion(suggestion)}
+                    >
+                      <Check size={13} />
+                      <span>Add</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      disabled={isBusy}
+                      onClick={() => void handleDismissSuggestion(suggestion.id)}
+                    >
+                      <X size={13} />
+                      <span>Dismiss</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       <div
         className="card preset-bar"

@@ -3,8 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { app } from 'electron';
 import type { OmarchyEnvironment, ShortcutsConfig } from '../../shared/types';
+import { setFocusedTextReader } from '../pipeline/correctionWatcher';
 import { generateOmarchySnippets } from './omarchy';
 import type {
+  FocusedTextResult,
   ForegroundAppInfo,
   PlatformBridge,
   PlatformEventHandlers,
@@ -23,6 +25,8 @@ interface HelperMessage {
   processName?: string;
   title?: string;
   isTerminal?: boolean;
+  text?: string;
+  reason?: string;
 }
 
 interface PendingRequest {
@@ -75,6 +79,7 @@ export class WindowsBridge implements PlatformBridge {
 
     await this.spawnHelper();
     await this.updateShortcuts(shortcuts);
+    setFocusedTextReader(() => this.readFocusedText());
   }
 
   private async spawnHelper(): Promise<void> {
@@ -276,6 +281,7 @@ export class WindowsBridge implements PlatformBridge {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    setFocusedTextReader(null);
     const child = this.proc;
     if (!child) {
       this.rejectAllPending(new Error('WindowsBridge stopped'));
@@ -338,6 +344,24 @@ export class WindowsBridge implements PlatformBridge {
       };
     } catch {
       return { processName: '', title: '', isTerminal: false };
+    }
+  }
+
+  async readFocusedText(): Promise<FocusedTextResult> {
+    if (!this.proc) {
+      return { ok: false, reason: 'not-running' };
+    }
+    try {
+      const res = await this.sendCommand('read-focused-text', {}, 5000);
+      return {
+        ok: Boolean(res.ok),
+        text: typeof res.text === 'string' ? res.text : undefined,
+        processName: typeof res.processName === 'string' ? res.processName : undefined,
+        title: typeof res.title === 'string' ? res.title : undefined,
+        reason: typeof res.reason === 'string' ? res.reason : undefined,
+      };
+    } catch {
+      return { ok: false, reason: 'error' };
     }
   }
 

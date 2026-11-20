@@ -26,7 +26,7 @@ import type { PlatformBridge } from './platform/types';
 import type { SoundResolver } from './sounds/soundResolver';
 import type { DictationStateMachine } from './stateMachine';
 import type { AppDatabase } from './storage/db';
-import { computeUsageStats } from './storage/stats';
+import { computeUsageStats, getTokenUsageStats } from './storage/stats';
 import type { AppTrayController } from './tray';
 import { showAndFocusHub } from './windows/hubWindow';
 import type { HudWindowController } from './windows/hudWindow';
@@ -191,6 +191,15 @@ export function registerIpcHandlers(ctx: AppRuntimeContext): void {
   ipcMain.handle(IPC.DICTIONARY_DELETE, (_event, id: string) => {
     ctx.db.deleteDictionary(id);
   });
+  ipcMain.handle(IPC.DICTIONARY_SUGGESTIONS_LIST, () =>
+    ctx.db.listDictionarySuggestions()
+  );
+  ipcMain.handle(IPC.DICTIONARY_SUGGESTIONS_ACCEPT, (_event, id: string) =>
+    ctx.db.acceptDictionarySuggestion(id)
+  );
+  ipcMain.handle(IPC.DICTIONARY_SUGGESTIONS_DISMISS, (_event, id: string) => {
+    ctx.db.dismissDictionarySuggestion(id);
+  });
 
   // ---- Snippets ----
   ipcMain.handle(IPC.SNIPPETS_LIST, () => ctx.db.listSnippets());
@@ -262,6 +271,9 @@ export function registerIpcHandlers(ctx: AppRuntimeContext): void {
     await ctx.platform.copyText(entry.pastedText);
   });
   ipcMain.handle(IPC.STATS_GET, () => computeUsageStats(ctx.db.listHistory({ includeArchived: true })));
+  ipcMain.handle(IPC.TOKEN_STATS_GET, () =>
+    getTokenUsageStats(ctx.db.listHistory({ includeArchived: true }))
+  );
 
   // ---- Model & GPU ----
   ipcMain.handle(IPC.MODEL_STATUS, () => ctx.getAsr().getStatus());

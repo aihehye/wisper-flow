@@ -3,6 +3,8 @@ import crypto from 'node:crypto';
 import { DICTATION_DEBOUNCE_MS, DOUBLE_TAP_WINDOW_MS, MAX_RECORDING_STOP_MS, MAX_RECORDING_WARN_MS } from '../shared/defaults.ts';
 // @ts-ignore Node --experimental-strip-types requires explicit .ts extension
 import { runTextPipeline } from './pipeline/textPipeline.ts';
+// @ts-ignore Node --experimental-strip-types requires explicit .ts extension
+import { scheduleCorrectionWatch } from './pipeline/correctionWatcher.ts';
 import type {
   AppSettings,
   HistoryEntry,
@@ -28,6 +30,7 @@ export interface StateMachineDeps {
   }) => void;
   playSound: (slot: SoundSlot) => void;
   onHistoryAdded: (entry: HistoryEntry) => void;
+  onSuggestionsUpdated?: () => void;
   getExtraExcludePids?: () => number[];
 }
 
@@ -468,6 +471,7 @@ export class DictationStateMachine {
 
     let rawText = '';
     let detectedLanguage: string | undefined;
+    let asrUsage: { promptTokens: number; completionTokens: number; totalTokens: number; estimated?: boolean } | undefined;
     try {
       const asrResult = await this.deps.asr.transcribe({
         wavBuffer: payload.wavBuffer,
@@ -477,6 +481,7 @@ export class DictationStateMachine {
       });
       rawText = asrResult.rawText;
       detectedLanguage = asrResult.detectedLanguage;
+      asrUsage = asrResult.usage;
     } catch (err) {
       if (this.disposed || this.sessionId !== activeSessionId) return;
       const msg = err instanceof Error ? err.message : 'Transcription failed';
@@ -539,6 +544,10 @@ export class DictationStateMachine {
       language: detectedLanguage || settings.language,
       micDevice: settings.microphoneDeviceId,
       archived: false,
+      promptTokens: asrUsage?.promptTokens ?? 0,
+      completionTokens: asrUsage?.completionTokens ?? 0,
+      totalTokens: asrUsage?.totalTokens ?? 0,
+      tokensEstimated: asrUsage?.estimated ?? false,
     });
     this.deps.onHistoryAdded(historyEntry);
 
@@ -560,6 +569,28 @@ export class DictationStateMachine {
 
     this.deps.playSound('paste');
     this.emitHudState();
+
+    scheduleCorrectionWatch(
+      {
+        pastedText: textToPaste,
+        targetAppName: capturedApp.processName,
+        targetWindowTitle: capturedApp.title,
+        readFocusedText: this.deps.platform.readFocusedText
+          ? () => this.deps.platform.readFocusedText!()
+          : undefined,
+      },
+      (candidate) => {
+        if (this.disposed) return;
+        const created = this.deps.db.addDictionarySuggestion({
+          phrase: candidate.phrase,
+          replacement: candidate.replacement,
+          appName: candidate.appName,
+        });
+        if (created) {
+          this.deps.onSuggestionsUpdated?.();
+        }
+      }
+    );
   }
 
   async handlePasteLast(): Promise<void> {

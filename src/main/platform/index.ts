@@ -10,6 +10,7 @@ export function createPlatformBridge(): PlatformBridge {
 }
 
 export type {
+  FocusedTextResult,
   ForegroundAppInfo,
   PlatformBridge,
   PlatformEventHandlers,

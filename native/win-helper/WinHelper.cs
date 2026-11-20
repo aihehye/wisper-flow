@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
+using System.Windows.Automation;
 using System.Windows.Forms;
 
 namespace WisperFlowHelper
@@ -174,6 +175,15 @@ namespace WisperFlowHelper
                         var info = GetForegroundInfo();
                         Reply(id, info);
                     }));
+                    break;
+
+                case "read-focused-text":
+                    var uiaThread = new Thread(() =>
+                    {
+                        var res = ReadFocusedText();
+                        Reply(id, res);
+                    }) { IsBackground = true };
+                    uiaThread.Start();
                     break;
 
                 case "paste-text":
@@ -615,6 +625,169 @@ namespace WisperFlowHelper
                 { "title", title },
                 { "isTerminal", TerminalExes.Contains(procName) }
             };
+        }
+
+        private const int MaxFocusedTextLength = 16384;
+
+        private static string CapFocusedText(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            if (text.Length <= MaxFocusedTextLength) return text;
+            return text.Substring(text.Length - MaxFocusedTextLength);
+        }
+
+        private static Dictionary<string, object> ReadFocusedText()
+        {
+            string procName = "";
+            string title = "";
+            try
+            {
+                var fg = GetForegroundInfo();
+                if (fg.ContainsKey("processName")) procName = Convert.ToString(fg["processName"]) ?? "";
+                if (fg.ContainsKey("title")) title = Convert.ToString(fg["title"]) ?? "";
+            }
+            catch { }
+
+            try
+            {
+                AutomationElement focused = AutomationElement.FocusedElement;
+                if (focused == null)
+                {
+                    return new Dictionary<string, object>
+                    {
+                        { "ok", false },
+                        { "reason", "no-focus" },
+                        { "processName", procName },
+                        { "title", title }
+                    };
+                }
+
+                bool isPassword = false;
+                try
+                {
+                    isPassword = focused.Current.IsPassword;
+                }
+                catch { }
+
+                if (isPassword)
+                {
+                    return new Dictionary<string, object>
+                    {
+                        { "ok", false },
+                        { "reason", "password" },
+                        { "processName", procName },
+                        { "title", title }
+                    };
+                }
+
+                string valueText = null;
+                bool hasValuePattern = false;
+                object patternObj;
+
+                try
+                {
+                    if (focused.TryGetCurrentPattern(ValuePattern.Pattern, out patternObj))
+                    {
+                        var vp = patternObj as ValuePattern;
+                        if (vp != null)
+                        {
+                            hasValuePattern = true;
+                            valueText = vp.Current.Value ?? "";
+                        }
+                    }
+                }
+                catch { }
+
+                if (hasValuePattern && !string.IsNullOrEmpty(valueText))
+                {
+                    return new Dictionary<string, object>
+                    {
+                        { "ok", true },
+                        { "text", CapFocusedText(valueText) },
+                        { "processName", procName },
+                        { "title", title }
+                    };
+                }
+
+                try
+                {
+                    if (focused.TryGetCurrentPattern(TextPattern.Pattern, out patternObj))
+                    {
+                        var tp = patternObj as TextPattern;
+                        if (tp != null && tp.DocumentRange != null)
+                        {
+                            string docText = tp.DocumentRange.GetText(MaxFocusedTextLength + 1) ?? "";
+                            if (docText.Length > MaxFocusedTextLength)
+                            {
+                                docText = docText.Substring(0, MaxFocusedTextLength);
+                            }
+                            return new Dictionary<string, object>
+                            {
+                                { "ok", true },
+                                { "text", docText },
+                                { "processName", procName },
+                                { "title", title }
+                            };
+                        }
+                    }
+                }
+                catch { }
+
+                try
+                {
+                    // UIA_LegacyIAccessibleValuePropertyId = 30093 (not exposed as a managed pattern in .NET 4 UIAutomationClient)
+                    var legacyValueProp = AutomationProperty.LookupById(30093);
+                    if (legacyValueProp != null)
+                    {
+                        object legacyObj = focused.GetCurrentPropertyValue(legacyValueProp, true);
+                        if (legacyObj != null && legacyObj != AutomationElement.NotSupported)
+                        {
+                            string legacyVal = legacyObj as string;
+                            if (!string.IsNullOrEmpty(legacyVal))
+                            {
+                                return new Dictionary<string, object>
+                                {
+                                    { "ok", true },
+                                    { "text", CapFocusedText(legacyVal) },
+                                    { "processName", procName },
+                                    { "title", title }
+                                };
+                            }
+                        }
+                    }
+                }
+                catch { }
+
+                if (hasValuePattern)
+                {
+                    return new Dictionary<string, object>
+                    {
+                        { "ok", true },
+                        { "text", CapFocusedText(valueText ?? "") },
+                        { "processName", procName },
+                        { "title", title }
+                    };
+                }
+
+                return new Dictionary<string, object>
+                {
+                    { "ok", false },
+                    { "reason", "unsupported" },
+                    { "processName", procName },
+                    { "title", title }
+                };
+            }
+            catch (Exception ex)
+            {
+                return new Dictionary<string, object>
+                {
+                    { "ok", false },
+                    { "reason", "error" },
+                    { "error", ex.Message },
+                    { "processName", procName },
+                    { "title", title }
+                };
+            }
         }
 
         // ---- Clipboard & Auto-Paste ----

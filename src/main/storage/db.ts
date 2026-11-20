@@ -7,6 +7,7 @@ import { createDefaultSettings } from '../../shared/defaults.ts';
 import type {
   AppSettings,
   DictionaryEntry,
+  DictionarySuggestion,
   HistoryEntry,
   PlatformKind,
   RegexRuleEntry,
@@ -50,6 +51,14 @@ interface RegexRuleRow {
   modified_at: string;
 }
 
+interface DictionarySuggestionRow {
+  id: string;
+  phrase: string;
+  replacement: string;
+  app_name: string | null;
+  created_at: string;
+}
+
 interface HistoryRow {
   id: string;
   timestamp: string;
@@ -65,6 +74,10 @@ interface HistoryRow {
   language: string;
   mic_device: string;
   archived: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  tokens_estimated: number;
 }
 
 function mapDictionaryRow(row: DictionaryRow): DictionaryEntry {
@@ -108,6 +121,16 @@ function mapRegexRuleRow(row: RegexRuleRow): RegexRuleEntry {
   };
 }
 
+function mapDictionarySuggestionRow(row: DictionarySuggestionRow): DictionarySuggestion {
+  return {
+    id: row.id,
+    phrase: row.phrase,
+    replacement: row.replacement,
+    appName: row.app_name,
+    createdAt: row.created_at,
+  };
+}
+
 function mapHistoryRow(row: HistoryRow): HistoryEntry {
   return {
     id: row.id,
@@ -124,6 +147,10 @@ function mapHistoryRow(row: HistoryRow): HistoryEntry {
     language: row.language,
     micDevice: row.mic_device,
     archived: Boolean(row.archived),
+    promptTokens: row.prompt_tokens ?? 0,
+    completionTokens: row.completion_tokens ?? 0,
+    totalTokens: row.total_tokens ?? 0,
+    tokensEstimated: Boolean(row.tokens_estimated),
   };
 }
 
@@ -237,9 +264,36 @@ export class AppDatabase {
         archived INTEGER NOT NULL DEFAULT 0
       );
 
+      CREATE TABLE IF NOT EXISTS dictionary_suggestions (
+        id TEXT PRIMARY KEY,
+        phrase TEXT NOT NULL,
+        replacement TEXT NOT NULL,
+        app_name TEXT,
+        created_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_history_timestamp ON history (timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_regex_sort_order ON regex_rules (sort_order ASC);
+      CREATE INDEX IF NOT EXISTS idx_dict_suggestions_created ON dictionary_suggestions (created_at DESC);
     `);
+
+    this.migrateHistoryTokenColumns();
+  }
+
+  private migrateHistoryTokenColumns(): void {
+    const cols = this.db.prepare('PRAGMA table_info(history)').all() as Array<{ name: string }>;
+    const existing = new Set(cols.map((c) => c.name));
+    const additions: Array<[string, string]> = [
+      ['prompt_tokens', 'INTEGER NOT NULL DEFAULT 0'],
+      ['completion_tokens', 'INTEGER NOT NULL DEFAULT 0'],
+      ['total_tokens', 'INTEGER NOT NULL DEFAULT 0'],
+      ['tokens_estimated', 'INTEGER NOT NULL DEFAULT 0'],
+    ];
+    for (const [col, def] of additions) {
+      if (!existing.has(col)) {
+        this.db.exec(`ALTER TABLE history ADD COLUMN ${col} ${def}`);
+      }
+    }
   }
 
   private runInTransaction<T>(fn: () => T): T {
@@ -356,6 +410,80 @@ export class AppDatabase {
         stmt.run(now, id);
       }
     });
+  }
+
+  listDictionarySuggestions(): DictionarySuggestion[] {
+    const rows = this.db
+      .prepare('SELECT * FROM dictionary_suggestions ORDER BY created_at DESC')
+      .all() as unknown as DictionarySuggestionRow[];
+    return rows.map(mapDictionarySuggestionRow);
+  }
+
+  addDictionarySuggestion(input: {
+    phrase: string;
+    replacement: string;
+    appName?: string | null;
+  }): DictionarySuggestion | null {
+    const phrase = input.phrase.trim();
+    const replacement = input.replacement.trim();
+    if (!phrase || !replacement || phrase.toLowerCase() === replacement.toLowerCase()) {
+      return null;
+    }
+
+    const inDict = this.db
+      .prepare('SELECT 1 FROM dictionary WHERE lower(phrase) = lower(?) LIMIT 1')
+      .get(phrase);
+    if (inDict) {
+      return null;
+    }
+
+    const existingSuggestion = this.db
+      .prepare(
+        'SELECT 1 FROM dictionary_suggestions WHERE lower(phrase) = lower(?) AND lower(replacement) = lower(?) LIMIT 1'
+      )
+      .get(phrase, replacement);
+    if (existingSuggestion) {
+      return null;
+    }
+
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const appName = input.appName?.trim() || null;
+
+    this.db
+      .prepare(
+        `INSERT INTO dictionary_suggestions (id, phrase, replacement, app_name, created_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(id, phrase, replacement, appName, createdAt);
+
+    const saved = this.db
+      .prepare('SELECT * FROM dictionary_suggestions WHERE id = ?')
+      .get(id) as unknown as DictionarySuggestionRow;
+    return mapDictionarySuggestionRow(saved);
+  }
+
+  acceptDictionarySuggestion(id: string): DictionaryEntry | null {
+    return this.runInTransaction(() => {
+      const row = this.db
+        .prepare('SELECT * FROM dictionary_suggestions WHERE id = ?')
+        .get(id) as unknown as DictionarySuggestionRow | undefined;
+      if (!row) {
+        return null;
+      }
+
+      const entry = this.upsertDictionary({
+        phrase: row.phrase,
+        replacement: row.replacement,
+        enabled: true,
+      });
+      this.db.prepare('DELETE FROM dictionary_suggestions WHERE id = ?').run(id);
+      return entry;
+    });
+  }
+
+  dismissDictionarySuggestion(id: string): void {
+    this.db.prepare('DELETE FROM dictionary_suggestions WHERE id = ?').run(id);
   }
 
   listSnippets(): SnippetEntry[] {
@@ -583,8 +711,9 @@ export class AppDatabase {
         `INSERT INTO history (
           id, timestamp, asr_text, formatted_text, pasted_text,
           app_name, window_title, duration_sec, speech_duration_sec,
-          num_words, e2e_latency_ms, language, mic_device, archived
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          num_words, e2e_latency_ms, language, mic_device, archived,
+          prompt_tokens, completion_tokens, total_tokens, tokens_estimated
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -600,7 +729,11 @@ export class AppDatabase {
         entry.e2eLatencyMs,
         entry.language,
         entry.micDevice,
-        entry.archived ? 1 : 0
+        entry.archived ? 1 : 0,
+        Math.max(0, Math.round(entry.promptTokens ?? 0)),
+        Math.max(0, Math.round(entry.completionTokens ?? 0)),
+        Math.max(0, Math.round(entry.totalTokens ?? 0)),
+        entry.tokensEstimated ? 1 : 0
       );
 
     const saved = this.db

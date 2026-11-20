@@ -8,6 +8,9 @@ export const IPC = {
   DICTIONARY_LIST: 'dictionary:list',
   DICTIONARY_UPSERT: 'dictionary:upsert',
   DICTIONARY_DELETE: 'dictionary:delete',
+  DICTIONARY_SUGGESTIONS_LIST: 'dictionary:suggestions-list',
+  DICTIONARY_SUGGESTIONS_ACCEPT: 'dictionary:suggestions-accept',
+  DICTIONARY_SUGGESTIONS_DISMISS: 'dictionary:suggestions-dismiss',
 
   SNIPPETS_LIST: 'snippets:list',
   SNIPPETS_UPSERT: 'snippets:upsert',
@@ -25,6 +28,7 @@ export const IPC = {
   HISTORY_PASTE_ENTRY: 'history:paste-entry',
   HISTORY_COPY_ENTRY: 'history:copy-entry',
   STATS_GET: 'stats:get',
+  TOKEN_STATS_GET: 'stats:tokens-get',
 
   MODEL_STATUS: 'model:status',
   MODEL_DOWNLOAD: 'model:download',
@@ -61,4 +65,5 @@ export const IPC = {
   EVENT_HISTORY_ADDED: 'event:history-added',
   EVENT_OMARCHY_PALETTE: 'event:omarchy-palette',
   EVENT_NAVIGATE: 'event:navigate',
+  DICTIONARY_SUGGESTIONS_UPDATED: 'wisper:dictionary-suggestions-updated',
 } as const;

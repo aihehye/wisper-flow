@@ -7,10 +7,18 @@ export interface TranscribeRequest {
   contextHints?: string[]; // Vocabulary hints from Dictionary
 }
 
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  estimated?: boolean;
+}
+
 export interface TranscribeResult {
   rawText: string;
   detectedLanguage?: string;
   asrLatencyMs: number;
+  usage?: TokenUsage;
 }
 
 export interface AsrBackend {

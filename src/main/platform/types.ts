@@ -6,6 +6,14 @@ export interface ForegroundAppInfo {
   isTerminal: boolean;
 }
 
+export interface FocusedTextResult {
+  ok: boolean;
+  text?: string;
+  processName?: string;
+  title?: string;
+  reason?: string;
+}
+
 export interface PlatformPasteOptions {
   text: string;
   restoreClipboard: boolean;
@@ -41,6 +49,7 @@ export interface PlatformBridge {
   startShortcutCapture(): Promise<void>;
   stopShortcutCapture(): Promise<void>;
   getForegroundApp(): Promise<ForegroundAppInfo>;
+  readFocusedText?(): Promise<FocusedTextResult>;
   pasteText(options: PlatformPasteOptions): Promise<{ ok: boolean; error?: string }>;
   copyText(text: string): Promise<{ ok: boolean; error?: string }>;
   muteOtherAudio(excludePids: number[]): Promise<void>;

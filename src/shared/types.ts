@@ -129,6 +129,50 @@ export interface HistoryEntry {
   language: string;
   micDevice: string;
   archived: boolean;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  tokensEstimated?: boolean;
+}
+
+export interface DictionarySuggestion {
+  id: string;
+  phrase: string;
+  replacement: string;
+  appName: string | null;
+  createdAt: string;
+}
+
+export interface TokenUsageBucket {
+  totalTokens: number;
+  promptTokens: number;
+  completionTokens: number;
+  dictations: number;
+}
+
+export interface TokenUsageStats {
+  allTime: TokenUsageBucket & { measuredDictations: number };
+  today: TokenUsageBucket;
+  last7Days: TokenUsageBucket;
+  byApp: Array<{ appName: string; totalTokens: number; dictations: number }>;
+  byDay: Array<{
+    date: string;
+    totalTokens: number;
+    promptTokens: number;
+    completionTokens: number;
+    dictations: number;
+  }>;
+  recent: Array<{
+    id: string;
+    timestamp: string;
+    appName: string;
+    numWords: number;
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    estimated: boolean;
+    textPreview: string;
+  }>;
 }
 
 export interface UsageStats {

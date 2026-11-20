@@ -367,6 +367,11 @@ async function bootstrap(): Promise<void> {
       }
       tray?.update({ latestHistory: entry });
     },
+    onSuggestionsUpdated: () => {
+      if (hubWindow && !hubWindow.isDestroyed() && !hubWindow.webContents.isDestroyed()) {
+        hubWindow.webContents.send(IPC.DICTIONARY_SUGGESTIONS_UPDATED);
+      }
+    },
     getExtraExcludePids: () =>
       app
         .getAppMetrics()

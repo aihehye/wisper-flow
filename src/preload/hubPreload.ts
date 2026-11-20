@@ -4,6 +4,7 @@ import type {
   AppSettings,
   AudioDeviceOption,
   DictionaryEntry,
+  DictionarySuggestion,
   HistoryEntry,
   ModelStatus,
   OmarchyEnvironment,
@@ -14,6 +15,7 @@ import type {
   SnippetEntry,
   SoundSlot,
   SoundSlotStatus,
+  TokenUsageStats,
   UsageStats,
 } from '../shared/types';
 
@@ -78,6 +80,12 @@ export const wisperHubApi = {
     entry: Partial<DictionaryEntry> & { phrase: string; replacement: string | null },
   ): Promise<DictionaryEntry> => ipcRenderer.invoke(IPC.DICTIONARY_UPSERT, entry),
   deleteDictionary: (id: string): Promise<void> => ipcRenderer.invoke(IPC.DICTIONARY_DELETE, id),
+  listDictionarySuggestions: (): Promise<DictionarySuggestion[]> =>
+    ipcRenderer.invoke(IPC.DICTIONARY_SUGGESTIONS_LIST),
+  acceptDictionarySuggestion: (id: string): Promise<DictionaryEntry | null> =>
+    ipcRenderer.invoke(IPC.DICTIONARY_SUGGESTIONS_ACCEPT, id),
+  dismissDictionarySuggestion: (id: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.DICTIONARY_SUGGESTIONS_DISMISS, id),
 
   // Snippets
   listSnippets: (): Promise<SnippetEntry[]> => ipcRenderer.invoke(IPC.SNIPPETS_LIST),
@@ -110,6 +118,7 @@ export const wisperHubApi = {
   pasteHistoryEntry: (id: string): Promise<void> => ipcRenderer.invoke(IPC.HISTORY_PASTE_ENTRY, id),
   copyHistoryEntry: (id: string): Promise<void> => ipcRenderer.invoke(IPC.HISTORY_COPY_ENTRY, id),
   getStats: (): Promise<UsageStats> => ipcRenderer.invoke(IPC.STATS_GET),
+  getTokenStats: (): Promise<TokenUsageStats> => ipcRenderer.invoke(IPC.TOKEN_STATS_GET),
 
   // Model & GPU
   getModelStatus: (): Promise<ModelStatus> => ipcRenderer.invoke(IPC.MODEL_STATUS),
@@ -149,6 +158,8 @@ export const wisperHubApi = {
     subscribe<HubPage | NavigatePayload>(IPC.EVENT_NAVIGATE, cb),
   onPlaySound: (cb: (payload: PlaySoundPayload) => void): (() => void) =>
     subscribe<PlaySoundPayload>(IPC.EVENT_PLAY_SOUND, cb),
+  onSuggestionsUpdated: (cb: () => void): (() => void) =>
+    subscribe<void>(IPC.DICTIONARY_SUGGESTIONS_UPDATED, () => cb()),
 };
 
 export type WisperHubApi = typeof wisperHubApi;
