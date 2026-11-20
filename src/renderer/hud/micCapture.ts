@@ -30,9 +30,72 @@ class WisperPcmProcessor extends AudioWorkletProcessor {
 registerProcessor('wisper-pcm-processor', WisperPcmProcessor);
 `;
 
-const WHISPER_GAIN_MULTIPLIER = 3.2;
 const SPEECH_RMS_THRESHOLD = 0.014;
 const BAR_COUNT = 10;
+
+export const PRE_ROLL_MS = 250;
+export const TAIL_DRAIN_MS = 150;
+export const WHISPER_PEAK_THRESHOLD = 0.15;
+export const WHISPER_TARGET_PEAK = 0.5;
+export const WHISPER_MAX_GAIN = 6.0;
+
+export class RollingPreRollBuffer {
+  private readonly maxSamples: number;
+  private chunks: Float32Array[] = [];
+  private sampleCount = 0;
+
+  constructor(maxSamples: number) {
+    this.maxSamples = Math.max(0, Math.floor(maxSamples));
+  }
+
+  get totalSamples(): number {
+    return this.sampleCount;
+  }
+
+  push(chunk: Float32Array): void {
+    if (this.maxSamples <= 0 || chunk.length === 0) return;
+
+    if (chunk.length >= this.maxSamples) {
+      this.chunks = [new Float32Array(chunk.subarray(chunk.length - this.maxSamples))];
+      this.sampleCount = this.maxSamples;
+      return;
+    }
+
+    this.chunks.push(chunk);
+    this.sampleCount += chunk.length;
+
+    while (this.sampleCount > this.maxSamples && this.chunks.length > 0) {
+      const excess = this.sampleCount - this.maxSamples;
+      const head = this.chunks[0];
+      if (head.length <= excess) {
+        this.chunks.shift();
+        this.sampleCount -= head.length;
+      } else {
+        this.chunks[0] = head.subarray(excess);
+        this.sampleCount -= excess;
+      }
+    }
+  }
+
+  drain(): Float32Array[] {
+    const out = this.chunks.map((c) => new Float32Array(c));
+    this.chunks = [];
+    this.sampleCount = 0;
+    return out;
+  }
+
+  clear(): void {
+    this.chunks = [];
+    this.sampleCount = 0;
+  }
+}
+
+export function computeGentleWhisperGain(peak: number, whisperMode: boolean): number {
+  if (!whisperMode || peak <= 0 || peak >= WHISPER_PEAK_THRESHOLD) {
+    return 1;
+  }
+  return Math.min(WHISPER_MAX_GAIN, WHISPER_TARGET_PEAK / peak);
+}
 
 export async function enumerateAudioInputs(): Promise<AudioDeviceOption[]> {
   if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) {
@@ -78,32 +141,61 @@ function createAudioConstraints(deviceId?: string): MediaStreamConstraints {
   return { audio, video: false };
 }
 
+function getMediaErrorName(err: unknown): string {
+  if (err && typeof err === 'object' && 'name' in err && typeof err.name === 'string') {
+    return err.name;
+  }
+  return '';
+}
+
+function mapMediaError(err: unknown): Error {
+  const name = getMediaErrorName(err);
+  if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+    return new Error('Microphone permission denied — allow microphone access in system settings');
+  }
+  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+    return new Error('No microphone device found');
+  }
+  if (name === 'NotReadableError' || name === 'TrackStartError') {
+    return new Error('Microphone is in use or unreadable by another application');
+  }
+  return err instanceof Error ? err : new Error('Microphone access failed');
+}
+
 async function openMicStream(deviceId?: string): Promise<MediaStream> {
+  if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+    throw new Error('Microphone API is unavailable in this environment');
+  }
+
   try {
     return await navigator.mediaDevices.getUserMedia(createAudioConstraints(deviceId));
-  } catch {
-    // Fallback to default device if exact deviceId is temporarily unavailable
-    return navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-      video: false,
-    });
+  } catch (err) {
+    const name = getMediaErrorName(err);
+    const canFallbackToDefault =
+      Boolean(deviceId && deviceId !== 'default') &&
+      (name === 'OverconstrainedError' || name === 'NotFoundError' || name === 'DevicesNotFoundError');
+
+    if (!canFallbackToDefault) {
+      throw mapMediaError(err);
+    }
+
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: false,
+      });
+    } catch (fallbackErr) {
+      throw mapMediaError(fallbackErr);
+    }
   }
 }
 
-function softBoostSample(sample: number, boost: boolean): number {
-  if (!boost) {
-    return Math.max(-1, Math.min(1, sample));
-  }
-  const amplified = sample * WHISPER_GAIN_MULTIPLIER;
-  return Math.tanh(amplified);
-}
-
-function resampleFloat32(
+export function resampleFloat32(
   chunks: Float32Array[],
   inputSampleRate: number,
   targetSampleRate: number,
@@ -120,20 +212,21 @@ function resampleFloat32(
 
   const merged = new Float32Array(totalSamples);
   let offset = 0;
-  let peak = 0;
+  let rawPeak = 0;
   let speechFrames = 0;
   const frameSize = Math.max(1, Math.round(inputSampleRate * 0.02)); // 20 ms window
 
   for (const c of chunks) {
     for (let i = 0; i < c.length; i += 1) {
-      const s = softBoostSample(c[i], whisperMode);
+      const s = Math.max(-1, Math.min(1, c[i]));
       merged[offset + i] = s;
       const abs = Math.abs(s);
-      if (abs > peak) peak = abs;
+      if (abs > rawPeak) rawPeak = abs;
     }
     offset += c.length;
   }
 
+  // Compute speechDurationMs on raw audio before applying any whisper boost
   for (let start = 0; start < merged.length; start += frameSize) {
     const end = Math.min(merged.length, start + frameSize);
     let sumSq = 0;
@@ -146,6 +239,15 @@ function resampleFloat32(
     }
   }
   const speechDurationMs = speechFrames * 20;
+
+  const gain = computeGentleWhisperGain(rawPeak, whisperMode);
+  let peak = rawPeak;
+  if (gain !== 1) {
+    for (let i = 0; i < merged.length; i += 1) {
+      merged[i] = Math.max(-1, Math.min(1, merged[i] * gain));
+    }
+    peak = Math.min(1, rawPeak * gain);
+  }
 
   if (inputSampleRate === targetSampleRate) {
     return { pcm: merged, peak, speechDurationMs };
@@ -280,13 +382,55 @@ function computeCenterSymmetricBars(
   return { bars: nextBars, rms: boostedRms };
 }
 
-export async function startMicCapture(options: {
-  deviceId?: string;
-  whisperMode?: boolean;
-  onLevels?: (bars: number[]) => void;
-}): Promise<MicCaptureSession> {
-  const whisperMode = Boolean(options.whisperMode);
-  const stream = await openMicStream(options.deviceId);
+interface WarmMicPipeline {
+  deviceId: string;
+  deviceLabel: string;
+  stream: MediaStream;
+  track: MediaStreamTrack | undefined;
+  ctx: AudioContext;
+  source: MediaStreamAudioSourceNode;
+  analyser: AnalyserNode;
+  silentGain: GainNode;
+  workletNode: AudioWorkletNode | null;
+  scriptNode: ScriptProcessorNode | null;
+  blobUrl: string | null;
+  preRoll: RollingPreRollBuffer;
+  activeSink: ((chunk: Float32Array) => void) | null;
+  disposed: boolean;
+  dispose: () => Promise<void>;
+}
+
+let warmPipeline: WarmMicPipeline | null = null;
+let warmOpChain: Promise<unknown> = Promise.resolve();
+
+function serializeWarmOp<T>(fn: () => Promise<T>): Promise<T> {
+  const next = warmOpChain.then(fn, fn);
+  warmOpChain = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
+function normalizeDeviceId(deviceId?: string): string {
+  return deviceId && deviceId.trim().length > 0 ? deviceId : 'default';
+}
+
+function isPipelineAlive(pipeline: WarmMicPipeline | null, deviceId?: string): boolean {
+  if (!pipeline || pipeline.disposed) return false;
+  if (deviceId !== undefined && pipeline.deviceId !== normalizeDeviceId(deviceId)) return false;
+  if (pipeline.ctx.state === 'closed') return false;
+  const track = pipeline.track;
+  if (!track || track.readyState !== 'live') return false;
+  return true;
+}
+
+export function isWarmMicHealthy(deviceId?: string): boolean {
+  return isPipelineAlive(warmPipeline, deviceId);
+}
+
+async function createWarmPipeline(deviceId: string): Promise<WarmMicPipeline> {
+  const stream = await openMicStream(deviceId);
   const track = stream.getAudioTracks()[0];
   const deviceLabel = track?.label || 'Default Microphone';
 
@@ -294,62 +438,244 @@ export async function startMicCapture(options: {
     window.AudioContext ||
     (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
   const ctx = new AudioCtx({ sampleRate: RECORDING_SAMPLE_RATE, latencyHint: 'interactive' });
-  if (ctx.state === 'suspended') {
-    await ctx.resume();
-  }
 
-  const source = ctx.createMediaStreamSource(stream);
-  const analyser = ctx.createAnalyser();
-  analyser.fftSize = 256;
-  analyser.smoothingTimeConstant = 0.65;
-
-  const silentGain = ctx.createGain();
-  silentGain.gain.value = 0;
-
-  const chunks: Float32Array[] = [];
+  let source: MediaStreamAudioSourceNode | null = null;
+  let analyser: AnalyserNode | null = null;
+  let silentGain: GainNode | null = null;
   let workletNode: AudioWorkletNode | null = null;
   let scriptNode: ScriptProcessorNode | null = null;
   let blobUrl: string | null = null;
-  let closed = false;
-  const startedAt = performance.now();
 
-  source.connect(analyser);
-
-  let usedWorklet = false;
-  if (ctx.audioWorklet && typeof Blob !== 'undefined' && typeof URL !== 'undefined') {
-    try {
-      const blob = new Blob([WORKLET_PROCESSOR_CODE], { type: 'application/javascript' });
-      blobUrl = URL.createObjectURL(blob);
-      await ctx.audioWorklet.addModule(blobUrl);
-      workletNode = new AudioWorkletNode(ctx, 'wisper-pcm-processor');
-      workletNode.port.onmessage = (ev: MessageEvent<Float32Array>) => {
-        if (!closed && ev.data instanceof Float32Array) {
-          chunks.push(ev.data);
-        }
-      };
-      source.connect(workletNode);
-      workletNode.connect(silentGain);
-      silentGain.connect(ctx.destination);
-      usedWorklet = true;
-    } catch {
-      usedWorklet = false;
+  try {
+    if (ctx.state === 'suspended') {
+      await ctx.resume();
     }
-  }
 
-  if (!usedWorklet) {
-    scriptNode = ctx.createScriptProcessor(2048, 1, 1);
-    scriptNode.onaudioprocess = (ev: AudioProcessingEvent) => {
-      if (closed) return;
-      const input = ev.inputBuffer.getChannelData(0);
-      if (input.length > 0) {
-        chunks.push(new Float32Array(input));
+    source = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.65;
+
+    silentGain = ctx.createGain();
+    silentGain.gain.value = 0;
+
+    const actualSampleRate = ctx.sampleRate || RECORDING_SAMPLE_RATE;
+    const preRollMaxSamples = Math.round((actualSampleRate * PRE_ROLL_MS) / 1000);
+    const preRoll = new RollingPreRollBuffer(preRollMaxSamples);
+
+    const pipeline: WarmMicPipeline = {
+      deviceId,
+      deviceLabel,
+      stream,
+      track,
+      ctx,
+      source,
+      analyser,
+      silentGain,
+      workletNode: null,
+      scriptNode: null,
+      blobUrl: null,
+      preRoll,
+      activeSink: null,
+      disposed: false,
+      dispose: async () => {
+        if (pipeline.disposed) return;
+        pipeline.disposed = true;
+        pipeline.activeSink = null;
+        pipeline.preRoll.clear();
+
+        if (pipeline.track) {
+          pipeline.track.onended = null;
+        }
+        try {
+          pipeline.source.disconnect();
+        } catch {}
+        try {
+          pipeline.analyser.disconnect();
+        } catch {}
+        try {
+          pipeline.workletNode?.disconnect();
+          if (pipeline.workletNode) pipeline.workletNode.port.onmessage = null;
+        } catch {}
+        try {
+          pipeline.scriptNode?.disconnect();
+          if (pipeline.scriptNode) pipeline.scriptNode.onaudioprocess = null;
+        } catch {}
+        try {
+          pipeline.silentGain.disconnect();
+        } catch {}
+
+        for (const t of pipeline.stream.getTracks()) {
+          try {
+            t.stop();
+          } catch {}
+        }
+
+        if (pipeline.blobUrl) {
+          URL.revokeObjectURL(pipeline.blobUrl);
+          pipeline.blobUrl = null;
+        }
+
+        try {
+          if (pipeline.ctx.state !== 'closed') {
+            await pipeline.ctx.close();
+          }
+        } catch {}
+
+        if (warmPipeline === pipeline) {
+          warmPipeline = null;
+        }
+      },
+    };
+
+    const handlePcmChunk = (chunk: Float32Array) => {
+      if (pipeline.disposed || chunk.length === 0) return;
+      if (pipeline.activeSink) {
+        pipeline.activeSink(chunk);
+      } else {
+        pipeline.preRoll.push(chunk);
       }
     };
-    source.connect(scriptNode);
-    scriptNode.connect(silentGain);
-    silentGain.connect(ctx.destination);
+
+    source.connect(analyser);
+
+    let usedWorklet = false;
+    if (ctx.audioWorklet && typeof Blob !== 'undefined' && typeof URL !== 'undefined') {
+      try {
+        const blob = new Blob([WORKLET_PROCESSOR_CODE], { type: 'application/javascript' });
+        blobUrl = URL.createObjectURL(blob);
+        pipeline.blobUrl = blobUrl;
+        await ctx.audioWorklet.addModule(blobUrl);
+        workletNode = new AudioWorkletNode(ctx, 'wisper-pcm-processor');
+        workletNode.port.onmessage = (ev: MessageEvent<Float32Array>) => {
+          if (ev.data instanceof Float32Array) {
+            handlePcmChunk(ev.data);
+          }
+        };
+        source.connect(workletNode);
+        workletNode.connect(silentGain);
+        silentGain.connect(ctx.destination);
+        pipeline.workletNode = workletNode;
+        usedWorklet = true;
+      } catch {
+        usedWorklet = false;
+        if (blobUrl) {
+          URL.revokeObjectURL(blobUrl);
+          blobUrl = null;
+          pipeline.blobUrl = null;
+        }
+      }
+    }
+
+    if (!usedWorklet) {
+      scriptNode = ctx.createScriptProcessor(2048, 1, 1);
+      scriptNode.onaudioprocess = (ev: AudioProcessingEvent) => {
+        const input = ev.inputBuffer.getChannelData(0);
+        if (input.length > 0) {
+          handlePcmChunk(new Float32Array(input));
+        }
+      };
+      source.connect(scriptNode);
+      scriptNode.connect(silentGain);
+      silentGain.connect(ctx.destination);
+      pipeline.scriptNode = scriptNode;
+    }
+
+    if (track) {
+      track.onended = () => {
+        // If track ended while idle, dispose so next warm/start re-acquires cleanly.
+        if (!pipeline.disposed && !pipeline.activeSink) {
+          void pipeline.dispose();
+        }
+      };
+    }
+
+    return pipeline;
+  } catch (err) {
+    try {
+      source?.disconnect();
+      analyser?.disconnect();
+      workletNode?.disconnect();
+      scriptNode?.disconnect();
+      silentGain?.disconnect();
+    } catch {}
+    for (const t of stream.getTracks()) {
+      try {
+        t.stop();
+      } catch {}
+    }
+    if (blobUrl) {
+      URL.revokeObjectURL(blobUrl);
+    }
+    try {
+      if (ctx.state !== 'closed') {
+        await ctx.close();
+      }
+    } catch {}
+    throw err;
+  }
+}
+
+async function ensureWarmPipeline(
+  deviceId?: string,
+  options?: { forceRefresh?: boolean },
+): Promise<WarmMicPipeline> {
+  const targetId = normalizeDeviceId(deviceId);
+  if (!options?.forceRefresh && isPipelineAlive(warmPipeline, targetId)) {
+    const existing = warmPipeline!;
+    if (existing.ctx.state === 'suspended') {
+      await existing.ctx.resume();
+    }
+    return existing;
   }
 
+  if (warmPipeline) {
+    await warmPipeline.dispose();
+    warmPipeline = null;
+  }
+
+  const created = await createWarmPipeline(targetId);
+  warmPipeline = created;
+  return created;
+}
+
+export async function warmMic(
+  deviceId?: string,
+  options?: { forceRefresh?: boolean },
+): Promise<void> {
+  await serializeWarmOp(async () => {
+    await ensureWarmPipeline(deviceId, options);
+  });
+}
+
+export async function disposeWarmMic(): Promise<void> {
+  await serializeWarmOp(async () => {
+    if (warmPipeline) {
+      await warmPipeline.dispose();
+      warmPipeline = null;
+    }
+  });
+}
+
+export async function startMicCapture(options: {
+  deviceId?: string;
+  whisperMode?: boolean;
+  onLevels?: (bars: number[]) => void;
+}): Promise<MicCaptureSession> {
+  const whisperMode = Boolean(options.whisperMode);
+  const pipeline = await serializeWarmOp(() => ensureWarmPipeline(options.deviceId));
+
+  const chunks: Float32Array[] = pipeline.preRoll.drain();
+  let sessionClosed = false;
+  const startedAt = performance.now();
+
+  pipeline.activeSink = (chunk: Float32Array) => {
+    if (!sessionClosed) {
+      chunks.push(chunk);
+    }
+  };
+
+  const { analyser, ctx, deviceLabel } = pipeline;
   const freqData = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
   const timeData = new Uint8Array(new ArrayBuffer(analyser.fftSize));
   let currentBars = new Array<number>(BAR_COUNT).fill(0.06);
@@ -357,7 +683,7 @@ export async function startMicCapture(options: {
   let lastEmit = 0;
 
   const tick = (now: number) => {
-    if (closed) return;
+    if (sessionClosed || pipeline.disposed) return;
     if (now - lastEmit >= 28) {
       lastEmit = now;
       const { bars } = computeCenterSymmetricBars(
@@ -377,50 +703,27 @@ export async function startMicCapture(options: {
     rafId = requestAnimationFrame(tick);
   }
 
-  const teardown = async () => {
-    if (closed) return;
-    closed = true;
-    if (rafId) cancelAnimationFrame(rafId);
-
-    try {
-      source.disconnect();
-    } catch {}
-    try {
-      analyser.disconnect();
-    } catch {}
-    try {
-      workletNode?.disconnect();
-      if (workletNode) workletNode.port.onmessage = null;
-    } catch {}
-    try {
-      scriptNode?.disconnect();
-      if (scriptNode) scriptNode.onaudioprocess = null;
-    } catch {}
-    try {
-      silentGain.disconnect();
-    } catch {}
-
-    for (const t of stream.getTracks()) {
-      try {
-        t.stop();
-      } catch {}
+  const releaseSession = () => {
+    if (sessionClosed) return;
+    sessionClosed = true;
+    if (rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
     }
-
-    if (blobUrl) {
-      URL.revokeObjectURL(blobUrl);
-      blobUrl = null;
+    if (!pipeline.disposed) {
+      pipeline.activeSink = null;
+      pipeline.preRoll.clear();
     }
-
-    try {
-      await ctx.close();
-    } catch {}
   };
 
   return {
     stop: async () => {
       const durationMs = Math.max(0, Math.round(performance.now() - startedAt));
+      // Drain tail audio from OS / AudioWorklet buffers before ending capture
+      await new Promise<void>((resolve) => setTimeout(resolve, TAIL_DRAIN_MS));
       const actualSampleRate = ctx.sampleRate || RECORDING_SAMPLE_RATE;
-      await teardown();
+      releaseSession();
+
       const { pcm, peak, speechDurationMs } = resampleFloat32(
         chunks,
         actualSampleRate,
@@ -438,7 +741,7 @@ export async function startMicCapture(options: {
     },
     cancel: async () => {
       chunks.length = 0;
-      await teardown();
+      releaseSession();
     },
   };
 }

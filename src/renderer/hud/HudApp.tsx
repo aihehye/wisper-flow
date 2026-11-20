@@ -2,7 +2,14 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertCircle, Mic, Square, X } from 'lucide-react';
 import type { HudPayload } from '@shared/types';
 import { audioPlayer } from '../shared/audioPlayer';
-import { enumerateAudioInputs, startMicCapture, type MicCaptureSession } from './micCapture';
+import {
+  disposeWarmMic,
+  enumerateAudioInputs,
+  isWarmMicHealthy,
+  startMicCapture,
+  warmMic,
+  type MicCaptureSession,
+} from './micCapture';
 import './hud.css';
 
 const DEFAULT_BARS = new Array<number>(10).fill(0.08);
@@ -24,6 +31,8 @@ export const HudApp: React.FC = () => {
   const startingCaptureRef = useRef<Promise<MicCaptureSession | null> | null>(null);
   const abortedSessionIdRef = useRef<string | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
+  const microphoneDeviceIdRef = useRef<string>('default');
+  const pendingDeviceRefreshRef = useRef<boolean>(false);
   const hoverTimerRef = useRef<number | null>(null);
   const hoveredRef = useRef(false);
 
@@ -39,25 +48,50 @@ export const HudApp: React.FC = () => {
   useEffect(() => {
     let mounted = true;
 
+    const refreshWarmMic = (forceRefresh = false) => {
+      if (!mounted) return;
+      if (activeSessionIdRef.current || startingCaptureRef.current) {
+        pendingDeviceRefreshRef.current = true;
+        return;
+      }
+      pendingDeviceRefreshRef.current = false;
+      void warmMic(microphoneDeviceIdRef.current, { forceRefresh }).catch(() => {});
+    };
+
     void window.wisperHud
       ?.getState()
       .then((initial) => {
-        if (mounted && initial) {
+        if (!mounted) return;
+        if (initial) {
           setPayload(initial);
+          if (initial.microphoneDeviceId) {
+            microphoneDeviceIdRef.current = initial.microphoneDeviceId;
+          }
         }
+        refreshWarmMic();
       })
-      .catch(() => {});
+      .catch(() => {
+        refreshWarmMic();
+      });
 
     void syncAudioDevices();
 
     const handleDeviceChange = () => {
       void syncAudioDevices();
+      const currentDeviceId = microphoneDeviceIdRef.current;
+      if (currentDeviceId === 'default' || !isWarmMicHealthy(currentDeviceId)) {
+        refreshWarmMic(currentDeviceId === 'default');
+      }
     };
     navigator.mediaDevices?.addEventListener?.('devicechange', handleDeviceChange);
 
     const unsubState = window.wisperHud?.onHudState((next) => {
       if (!mounted) return;
       setPayload(next);
+      if (next.microphoneDeviceId && next.microphoneDeviceId !== microphoneDeviceIdRef.current) {
+        microphoneDeviceIdRef.current = next.microphoneDeviceId;
+        refreshWarmMic();
+      }
       if (next.toastMessage) {
         setDismissedToastKey(null);
       }
@@ -176,6 +210,10 @@ export const HudApp: React.FC = () => {
               error: message,
             });
           } catch {}
+        } finally {
+          if (pendingDeviceRefreshRef.current) {
+            refreshWarmMic(microphoneDeviceIdRef.current === 'default');
+          }
         }
       } else if (cmd.action === 'cancel') {
         abortedSessionIdRef.current = cmd.sessionId;
@@ -185,6 +223,9 @@ export const HudApp: React.FC = () => {
         setLiveBars(DEFAULT_BARS);
         if (session) {
           await session.cancel();
+        }
+        if (pendingDeviceRefreshRef.current) {
+          refreshWarmMic(microphoneDeviceIdRef.current === 'default');
         }
       }
     });
@@ -202,6 +243,7 @@ export const HudApp: React.FC = () => {
         void captureRef.current.cancel();
         captureRef.current = null;
       }
+      void disposeWarmMic();
     };
   }, [syncAudioDevices]);
 

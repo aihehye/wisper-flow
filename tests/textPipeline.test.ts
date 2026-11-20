@@ -261,5 +261,14 @@ describe('runTextPipeline', () => {
     assert.equal(runStutter('um the um the issue'), 'The issue');
     assert.equal(runStutter('I I agree'), 'I agree');
     assert.equal(runStutter('Check 20 20 and Done. Done!'), 'Check 20 20 and Done. Done!');
+    assert.equal(
+      runStutter("I don't have any of it. I don't have any of it. I don't have any of it."),
+      "I don't have any of it."
+    );
+    assert.equal(
+      runStutter('Like try not to get try not to get try not to get stuck'),
+      'Like try not to get stuck'
+    );
+    assert.equal(runStutter('Explain it and blah blah blah.'), 'Explain it and blah blah blah.');
   });
 });

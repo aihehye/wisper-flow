@@ -216,6 +216,7 @@ export interface HudPayload {
   dockPosition: DockPosition;
   pushToTalkLabel: string;
   handsFreeLabel: string;
+  microphoneDeviceId?: string;
   toastMessage?: string;
   toastKind?: 'info' | 'warning' | 'error';
   audioLevels?: number[]; // 10 normalized values 0..1

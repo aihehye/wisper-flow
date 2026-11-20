@@ -124,7 +124,7 @@ export function createDefaultSettings(platform: PlatformKind = process.platform 
     rumble: {
       digits: true,
       filler: false, // <nofiller>
-      verbatim: true, // <verbatim>
+      verbatim: false,
     },
     useDictionaryHints: true,
     launchAtLogin: true,

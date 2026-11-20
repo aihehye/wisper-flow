@@ -35,10 +35,27 @@ const STUTTER_PAIR_RE = new RegExp(
   `${STUTTER_BOUNDARY_BEFORE}(${WORD_TOKEN}[ \\t]+${WORD_TOKEN})(?:(?:,[ \\t]*|[ \\t]+)\\1)+${STUTTER_BOUNDARY_AFTER}`,
   'giu'
 );
+const STUTTER_PHRASE_RE = new RegExp(
+  `${STUTTER_BOUNDARY_BEFORE}(${WORD_TOKEN}(?:[ \\t]+${WORD_TOKEN}){2,5})(?:(?:[.,][ \\t]*|[ \\t]+)\\1)+${STUTTER_BOUNDARY_AFTER}`,
+  'giu'
+);
+const STUTTER_IDIOM_ALLOWLIST = new Set(['blah']);
 
-function collapseSpokenStutters(text: string): string {
-  // Collapse 1-word repeats first, then 2-word consecutive repeats, preserving first occurrence casing.
-  return text.replace(STUTTER_SINGLE_RE, '$1').replace(STUTTER_PAIR_RE, '$1');
+function isAllowlistedStutter(phrase: string): boolean {
+  const words = phrase.trim().toLowerCase().split(/\s+/);
+  return words.length > 0 && words.every((w) => STUTTER_IDIOM_ALLOWLIST.has(w));
+}
+
+function collapseStutterMatch(match: string, phrase: string): string {
+  return isAllowlistedStutter(phrase) ? match : phrase;
+}
+
+export function collapseSpokenStutters(text: string): string {
+  // Collapse 1-word, 2-word, and 3-6 word phrase repetition loops while preserving allowlisted idioms.
+  return text
+    .replace(STUTTER_SINGLE_RE, collapseStutterMatch)
+    .replace(STUTTER_PAIR_RE, collapseStutterMatch)
+    .replace(STUTTER_PHRASE_RE, collapseStutterMatch);
 }
 
 function escapeRegexLiteral(text: string): string {

@@ -126,6 +126,51 @@ export function cleanRumbleOutput(raw: string): { text: string; detectedLanguage
   return detectedLanguage ? { text, detectedLanguage } : { text };
 }
 
+function normalizeOverlapToken(token: string): string {
+  return token.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '').toLowerCase();
+}
+
+/**
+ * Joins chunk transcripts while deduplicating overlapping boundary words
+ * produced by overlapping audio chunks.
+ */
+export function joinChunkTranscripts(chunks: string[], maxOverlapWords = 6): string {
+  const mergedWords: string[] = [];
+
+  for (const rawChunk of chunks) {
+    const words = rawChunk.trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) continue;
+
+    if (mergedWords.length === 0) {
+      mergedWords.push(...words);
+      continue;
+    }
+
+    const maxK = Math.min(maxOverlapWords, mergedWords.length, words.length);
+    let overlapK = 0;
+
+    for (let k = maxK; k >= 1; k--) {
+      let allMatch = true;
+      for (let i = 0; i < k; i++) {
+        const prevNorm = normalizeOverlapToken(mergedWords[mergedWords.length - k + i]);
+        const nextNorm = normalizeOverlapToken(words[i]);
+        if (!prevNorm || prevNorm !== nextNorm) {
+          allMatch = false;
+          break;
+        }
+      }
+      if (allMatch) {
+        overlapK = k;
+        break;
+      }
+    }
+
+    mergedWords.push(...words.slice(overlapK));
+  }
+
+  return mergedWords.join(' ').trim();
+}
+
 export async function findFreePort(host = '127.0.0.1'): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -500,7 +545,7 @@ export class LlamaServerBackend implements AsrBackend {
 
     const asrLatencyMs = Math.round(performance.now() - t0);
     return {
-      rawText: texts.join(' ').trim(),
+      rawText: joinChunkTranscripts(texts),
       detectedLanguage,
       asrLatencyMs,
     };

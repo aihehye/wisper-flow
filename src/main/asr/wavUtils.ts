@@ -11,7 +11,7 @@ export interface WavStats {
 }
 
 const DEFAULT_SAMPLE_RATE = 16000;
-const SILENCE_THRESHOLD_INT16 = 220; // ~ -43 dBFS
+const FRAME_SILENCE_RMS_THRESHOLD = 120; // ~ -48.7 dBFS over 20ms frames
 
 /**
  * Encodes mono 16-bit PCM samples (from Int16Array or normalized Float32Array [-1, 1])
@@ -201,25 +201,44 @@ export function computeWavStats(wavBuf: Buffer): WavStats {
 }
 
 /**
- * Trims leading and trailing silence while preserving gentle speech onset/offset padding.
+ * Trims leading and trailing silence using 20ms frame-RMS gating (immune to single-sample clicks)
+ * while preserving gentle speech onset/offset padding.
  */
 export function trimSilenceWav(wavBuf: Buffer, keepHeadMs = 80, keepTailMs = 110): Buffer {
   const { sampleRate, samples } = decodeMonoWavSamples(wavBuf);
   const numSamples = samples.length;
-  if (numSamples === 0) return wavBuf;
+  if (numSamples === 0 || sampleRate <= 0) return wavBuf;
 
-  let firstActive = 0;
-  while (firstActive < numSamples && Math.abs(samples[firstActive]) < SILENCE_THRESHOLD_INT16) {
-    firstActive++;
+  const frameLen = Math.max(1, Math.floor(sampleRate * 0.02)); // 20 ms frames
+  const numFrames = Math.ceil(numSamples / frameLen);
+
+  const isFrameActive = (frameIdx: number): boolean => {
+    const start = frameIdx * frameLen;
+    const end = Math.min(numSamples, start + frameLen);
+    let sumSq = 0;
+    for (let i = start; i < end; i++) {
+      const s = samples[i];
+      sumSq += s * s;
+    }
+    const rms = Math.sqrt(sumSq / Math.max(1, end - start));
+    return rms >= FRAME_SILENCE_RMS_THRESHOLD;
+  };
+
+  let firstActiveFrame = 0;
+  while (firstActiveFrame < numFrames && !isFrameActive(firstActiveFrame)) {
+    firstActiveFrame++;
   }
-  if (firstActive >= numSamples) {
+  if (firstActiveFrame >= numFrames) {
     return wavBuf;
   }
 
-  let lastActive = numSamples - 1;
-  while (lastActive > firstActive && Math.abs(samples[lastActive]) < SILENCE_THRESHOLD_INT16) {
-    lastActive--;
+  let lastActiveFrame = numFrames - 1;
+  while (lastActiveFrame > firstActiveFrame && !isFrameActive(lastActiveFrame)) {
+    lastActiveFrame--;
   }
+
+  const firstActive = firstActiveFrame * frameLen;
+  const lastActive = Math.min(numSamples - 1, (lastActiveFrame + 1) * frameLen - 1);
 
   const padBefore = Math.floor((sampleRate * keepHeadMs) / 1000);
   const padAfter = Math.floor((sampleRate * keepTailMs) / 1000);
@@ -231,9 +250,15 @@ export function trimSilenceWav(wavBuf: Buffer, keepHeadMs = 80, keepTailMs = 110
 
 /**
  * Splits audio longer than `maxChunkSec` at the lowest-energy 150 ms valley
- * between `minChunkSec` and `maxChunkSec` recursively.
+ * between `minChunkSec` and `maxChunkSec` recursively, with `overlapMs` overlap
+ * so words at chunk boundaries are not chopped.
  */
-export function splitWavIntoChunks(wavBuf: Buffer, maxChunkSec = 28, minChunkSec = 16): Buffer[] {
+export function splitWavIntoChunks(
+  wavBuf: Buffer,
+  maxChunkSec = 28,
+  minChunkSec = 16,
+  overlapMs = 380
+): Buffer[] {
   const { sampleRate, samples } = decodeMonoWavSamples(wavBuf);
   if (samples.length === 0 || sampleRate <= 0) {
     return [wavBuf];
@@ -278,7 +303,10 @@ export function splitWavIntoChunks(wavBuf: Buffer, maxChunkSec = 28, minChunkSec
     splitIdx = Math.min(maxSamples, samples.length - 1);
   }
 
+  const overlapSamples = Math.max(0, Math.floor((sampleRate * overlapMs) / 1000));
+  const tailStart = splitIdx > overlapSamples ? splitIdx - overlapSamples : splitIdx;
+
   const head = encodePcm16MonoWav(samples.subarray(0, splitIdx), sampleRate);
-  const tail = encodePcm16MonoWav(samples.subarray(splitIdx), sampleRate);
-  return [head, ...splitWavIntoChunks(tail, maxChunkSec, minChunkSec)];
+  const tail = encodePcm16MonoWav(samples.subarray(tailStart), sampleRate);
+  return [head, ...splitWavIntoChunks(tail, maxChunkSec, minChunkSec, overlapMs)];
 }

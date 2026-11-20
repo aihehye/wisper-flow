@@ -35,6 +35,7 @@ const {
   parseDeviceListOutput,
   pickBestGpuDevice,
   cleanRumbleOutput,
+  joinChunkTranscripts,
 } = await import('../src/main/asr/llamaServerBackend');
 const { SoundResolver } = await import('../src/main/sounds/soundResolver');
 
@@ -148,6 +149,47 @@ test('splitWavIntoChunks keeps 10s WAV intact and splits 35s WAV at quiet valley
   // First chunk should split right around 20s (within the [19.75s, 20.25s] valley)
   const firstDurSec = decodeMonoWavSamples(chunks[0]).samples.length / sr;
   assert.ok(firstDurSec >= 19.7 && firstDurSec <= 20.3, `Expected split near 20s valley, got ${firstDurSec}s`);
+
+  // Verify ~380ms overlap between chunk 0 and chunk 1
+  const totalChunkSamples = chunks.reduce((acc, c) => acc + decodeMonoWavSamples(c).samples.length, 0);
+  const expectedOverlap = Math.floor((sr * 380) / 1000);
+  assert.equal(totalChunkSamples, samples.length + expectedOverlap);
+});
+
+test('trimSilenceWav ignores isolated single-sample clicks via 20ms frame-RMS gating', () => {
+  const sr = 16000;
+  const headSilence = new Int16Array(sr * 2);
+  headSilence[800] = 1500; // isolated single-sample click in silence
+  const tone = makeSineSamples(sr, 1.0, 440, 9000);
+  const tailSilence = new Int16Array(sr * 2);
+  tailSilence[sr * 2 - 500] = -1500; // isolated single-sample click in tail silence
+
+  const combined = new Int16Array(headSilence.length + tone.length + tailSilence.length);
+  combined.set(headSilence, 0);
+  combined.set(tone, headSilence.length);
+  combined.set(tailSilence, headSilence.length + tone.length);
+
+  const rawWav = encodePcm16MonoWav(combined, sr);
+  const trimmedWav = trimSilenceWav(rawWav, 80, 110);
+  const decoded = decodeMonoWavSamples(trimmedWav);
+  const trimmedDurationMs = (decoded.samples.length / decoded.sampleRate) * 1000;
+
+  assert.ok(trimmedDurationMs >= 1150 && trimmedDurationMs <= 1250, `Expected ~1190ms, got ${trimmedDurationMs}`);
+});
+
+test('joinChunkTranscripts deduplicates overlapping boundary words across chunks', () => {
+  assert.equal(
+    joinChunkTranscripts(['Hello world how are', 'how are you doing today']),
+    'Hello world how are you doing today'
+  );
+  assert.equal(
+    joinChunkTranscripts(['Something that works for.', 'For Linux tool and more']),
+    'Something that works for. Linux tool and more'
+  );
+  assert.equal(
+    joinChunkTranscripts(['First chunk.', '', 'Second chunk.']),
+    'First chunk. Second chunk.'
+  );
 });
 
 test('parseDeviceListOutput and pickBestGpuDevice select discrete NVIDIA over Intel iGPU', () => {

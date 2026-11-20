@@ -81,6 +81,7 @@ export class DictationStateMachine {
       dockPosition: settings.dockPosition,
       pushToTalkLabel: settings.shortcuts.pushToTalk,
       handsFreeLabel: settings.shortcuts.handsFree,
+      microphoneDeviceId: settings.microphoneDeviceId,
       recordingStartedAt: this.recordingStartedAt ?? undefined,
     };
   }
