@@ -302,7 +302,7 @@ within without witness woman women won wonder wonderful wood wooden wool word wo
 work worked worker workers working works workshop world worried worry worse worst
 worth would wound wrap write writer writers writes writing written wrong wrote yard
 yeah year years yellow yes yesterday yet you young your yours yourself youth zero zone
-subagent subagents typo typos lowercase uppercase casing autocomplete autosuggest
+agent agents browser browsers subagent subagents typo typos lowercase uppercase casing autocomplete autosuggest
 clipboard microphone hotkey hotkeys workflow workflows codebase workspace worktree
 screenshot screenshots timestamp timestamps filename filepath username password database
 endpoint endpoints frontend backend middleware refactor refactored refactoring runtime

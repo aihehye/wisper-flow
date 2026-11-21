@@ -370,4 +370,30 @@ describe('runTextPipeline', () => {
       'Ask Sonnet, Maniteja, Maniteja, and Omarchy on Antigravity with Neon.'
     );
   });
+
+  it('never turns agent, browser agent, say agent, or say instead into Sonnet or subagent', () => {
+    const dictionary = [
+      makeDict('d1', 'maniteja', 'Maniteja'),
+      makeDict('d2', 'omarchy', 'Omarchy'),
+      makeDict('d3', 'sonnet', 'Sonnet'),
+      makeDict('d4', 'subagent', 'subagent'),
+    ];
+
+    const runPhonetic = (text: string) =>
+      runTextPipeline(text, {
+        dictionary,
+        snippets: [],
+        regexRules: [],
+        cleanup: makeCleanup(),
+      }).finalOutput;
+
+    assert.equal(runPhonetic('Agent.'), 'Agent.');
+    assert.equal(runPhonetic('Can you ask the browser agent?'), 'Can you ask the browser agent?');
+    assert.equal(runPhonetic("where I'm trying to say agent"), "where I'm trying to say agent");
+    assert.equal(runPhonetic("let's say instead"), "let's say instead");
+    assert.equal(
+      runPhonetic('Ask Stoornet, manitija, Mantheja, Oomachi, and sub-agent.'),
+      'Ask Sonnet, Maniteja, Maniteja, Omarchy, and subagent.'
+    );
+  });
 });

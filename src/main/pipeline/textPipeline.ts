@@ -351,9 +351,10 @@ function weightedEditDistance(a: string, b: string): number {
 const FUNCTION_LEAD_WORDS = new Set([
   'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by', 'do', 'for', 'from', 'go',
   'has', 'have', 'he', 'hello', 'hey', 'hi', 'his', 'i', 'if', 'in', 'into', 'is', 'it',
-  'me', 'my', 'no', 'not', 'of', 'on', 'open', 'or', 'our', 'she', 'so', 'that', 'the',
-  'their', 'them', 'then', 'there', 'they', 'this', 'to', 'try', 'up', 'use', 'was',
-  'we', 'were', 'what', 'when', 'who', 'will', 'with', 'you', 'your',
+  'just', 'me', 'my', 'no', 'not', 'of', 'on', 'open', 'or', 'our', 'said', 'say',
+  'saying', 'she', 'so', 'that', 'the', 'their', 'them', 'then', 'there', 'they',
+  'this', 'to', 'try', 'trying', 'up', 'use', 'was', 'we', 'were', 'what', 'when',
+  'who', 'will', 'with', 'you', 'your',
 ]);
 
 const FUNCTION_TRAIL_WORDS = new Set([
@@ -467,12 +468,19 @@ function scorePhoneticMatch(
     spanSkel[spanSkel.length - 1] === tgtSkel[tgtSkel.length - 1] ||
     spanNorm.slice(-2) === target.normalized.slice(-2);
 
-  if (skelSim >= 0.72 && startsSame && endsSame) {
-    return skelSim;
-  }
+  if (tgtSkel.length <= 3) {
+    // Short target skeletons (e.g. "Sonnet" -> "snt") must not match endsSame-only shifts like "agent" ("jnt")
+    if (startsSame && skelSim >= 0.85) {
+      return skelSim;
+    }
+  } else {
+    if (skelSim >= 0.72 && startsSame && endsSame) {
+      return skelSim;
+    }
 
-  if (skelSim >= 0.75 && (startsSame || endsSame)) {
-    return skelSim;
+    if (skelSim >= 0.75 && (startsSame || endsSame)) {
+      return skelSim;
+    }
   }
 
   // Slightly looser threshold for 1-edit short skeletons (e.g. "Oomachi" -> "Omarchy", "high cube" -> "Haiku")
