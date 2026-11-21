@@ -36,9 +36,11 @@ const BAR_COUNT = 10;
 
 export const PRE_ROLL_MS = 250;
 export const TAIL_DRAIN_MS = 150;
-export const WHISPER_PEAK_THRESHOLD = 0.15;
-export const WHISPER_TARGET_PEAK = 0.5;
-export const WHISPER_MAX_GAIN = 6.0;
+export const WHISPER_TARGET_RMS = 0.1; // -20 dBFS linear RMS
+export const WHISPER_MAX_GAIN = 8.0;
+export const WHISPER_ACTIVITY_RMS_FLOOR = 0.0015; // ~ -56.5 dBFS, aligns with quiet silence floor
+export const SOFT_LIMITER_THRESHOLD = 0.75;
+export const SOFT_LIMITER_CEILING = 0.95;
 
 export class RollingPreRollBuffer {
   private readonly maxSamples: number;
@@ -91,11 +93,68 @@ export class RollingPreRollBuffer {
   }
 }
 
-export function computeGentleWhisperGain(peak: number, whisperMode: boolean): number {
-  if (!whisperMode || peak <= 0 || peak >= WHISPER_PEAK_THRESHOLD) {
+export function softLimitSample(x: number): number {
+  if (!Number.isFinite(x)) return 0;
+  const abs = Math.abs(x);
+  if (abs <= SOFT_LIMITER_THRESHOLD) return x;
+  const headroom = SOFT_LIMITER_CEILING - SOFT_LIMITER_THRESHOLD;
+  return (
+    Math.sign(x) *
+    (SOFT_LIMITER_THRESHOLD + headroom * Math.tanh((abs - SOFT_LIMITER_THRESHOLD) / headroom))
+  );
+}
+
+export function computeActiveSpeechRms(samples: Float32Array, sampleRate: number): number {
+  if (samples.length === 0 || sampleRate <= 0) return 0;
+  const frameSize = Math.max(1, Math.round(sampleRate * 0.02)); // 20 ms frames
+  const minTailSamples = samples.length < frameSize ? 1 : Math.max(1, Math.floor(frameSize / 2));
+  const activeRms: number[] = [];
+
+  for (let start = 0; start < samples.length; start += frameSize) {
+    const end = Math.min(samples.length, start + frameSize);
+    const len = end - start;
+    if (len < minTailSamples) continue;
+
+    let sumSq = 0;
+    for (let i = start; i < end; i += 1) {
+      const s = samples[i];
+      sumSq += s * s;
+    }
+    const rms = Math.sqrt(sumSq / len);
+    if (rms >= WHISPER_ACTIVITY_RMS_FLOOR) {
+      activeRms.push(rms);
+    }
+  }
+
+  if (activeRms.length === 0) return 0;
+  activeRms.sort((a, b) => a - b);
+  // 60th percentile of active frames ignores silence and resists single-frame click spikes
+  const idx = Math.min(activeRms.length - 1, Math.floor((activeRms.length - 1) * 0.6));
+  return activeRms[idx];
+}
+
+export function computeWhisperGainFromRms(activeRms: number, whisperMode: boolean): number {
+  if (
+    !whisperMode ||
+    !Number.isFinite(activeRms) ||
+    activeRms <= 0 ||
+    activeRms >= WHISPER_TARGET_RMS
+  ) {
     return 1;
   }
-  return Math.min(WHISPER_MAX_GAIN, WHISPER_TARGET_PEAK / peak);
+  return Math.min(WHISPER_MAX_GAIN, Math.max(1, WHISPER_TARGET_RMS / activeRms));
+}
+
+export function computeActiveSpeechWhisperGain(
+  samples: Float32Array,
+  sampleRate: number,
+  whisperMode: boolean,
+): number {
+  if (!whisperMode || samples.length === 0 || sampleRate <= 0) {
+    return 1;
+  }
+  const activeRms = computeActiveSpeechRms(samples, sampleRate);
+  return computeWhisperGainFromRms(activeRms, whisperMode);
 }
 
 export async function enumerateAudioInputs(): Promise<AudioDeviceOption[]> {
@@ -138,7 +197,7 @@ export function createAudioConstraints(
     channelCount: 1,
     echoCancellation: isNoisy,
     noiseSuppression: isNoisy,
-    autoGainControl: true,
+    autoGainControl: isNoisy,
   };
   if (deviceId && deviceId !== 'default') {
     audio.deviceId = { exact: deviceId };
@@ -240,13 +299,16 @@ export function resampleFloat32(
   }
   const speechDurationMs = speechFrames * 20;
 
-  const gain = computeGentleWhisperGain(rawPeak, whisperMode);
+  const gain = computeActiveSpeechWhisperGain(merged, inputSampleRate, whisperMode);
   let peak = rawPeak;
-  if (gain !== 1) {
+  if (gain !== 1 || rawPeak > SOFT_LIMITER_THRESHOLD) {
+    peak = 0;
     for (let i = 0; i < merged.length; i += 1) {
-      merged[i] = Math.max(-1, Math.min(1, merged[i] * gain));
+      const limited = softLimitSample(merged[i] * gain);
+      merged[i] = limited;
+      const abs = Math.abs(limited);
+      if (abs > peak) peak = abs;
     }
-    peak = Math.min(1, rawPeak * gain);
   }
 
   if (inputSampleRate === targetSampleRate) {

@@ -30,6 +30,7 @@ export type PlatformEventHandlers = {
   onCancelPressed: () => void;
   onPasteLastPressed: () => void;
   onCopyLastPressed: () => void;
+  onFixInputPressed?: () => void;
   onShortcutCaptured: (shortcut: string) => void;
   // Extra direct IPC commands (primarily Linux Unix socket CLI)
   onDirectPttStart?: () => void;
@@ -41,6 +42,13 @@ export type PlatformEventHandlers = {
   onPaletteChanged?: (palette: OmarchyPalette | null) => void;
 };
 
+export interface SelectAllCopyResult {
+  ok: boolean;
+  text?: string;
+  previousClipboard?: string | null;
+  error?: string;
+}
+
 export interface PlatformBridge {
   readonly kind: 'win32' | 'linux';
   start(handlers: PlatformEventHandlers, shortcuts: ShortcutsConfig): Promise<void>;
@@ -50,6 +58,7 @@ export interface PlatformBridge {
   stopShortcutCapture(): Promise<void>;
   getForegroundApp(): Promise<ForegroundAppInfo>;
   readFocusedText?(): Promise<FocusedTextResult>;
+  selectAllAndCopy?(): Promise<SelectAllCopyResult>;
   pasteText(options: PlatformPasteOptions): Promise<{ ok: boolean; error?: string }>;
   copyText(text: string): Promise<{ ok: boolean; error?: string }>;
   muteOtherAudio(excludePids: number[]): Promise<void>;

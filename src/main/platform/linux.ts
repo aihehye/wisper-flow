@@ -19,6 +19,7 @@ import type {
   PlatformBridge,
   PlatformEventHandlers,
   PlatformPasteOptions,
+  SelectAllCopyResult,
 } from './types';
 
 const execFileAsync = promisify(execFile);
@@ -234,6 +235,9 @@ export class LinuxBridge implements PlatformBridge {
       case 'copy-last':
         handlers?.onCopyLastPressed();
         break;
+      case 'fix-input':
+        handlers?.onFixInputPressed?.();
+        break;
       case 'show-hub':
         handlers?.onShowHub?.();
         break;
@@ -290,6 +294,10 @@ export class LinuxBridge implements PlatformBridge {
       {
         raw: shortcuts.copyLast,
         handler: () => this.handlers?.onCopyLastPressed(),
+      },
+      {
+        raw: shortcuts.fixInputHotkey,
+        handler: () => this.handlers?.onFixInputPressed?.(),
       },
       {
         raw: shortcuts.cancel,
@@ -557,6 +565,68 @@ export class LinuxBridge implements PlatformBridge {
     } catch {
       return false;
     }
+  }
+
+  async selectAllAndCopy(): Promise<SelectAllCopyResult> {
+    const previousClipboard = await this.snapshotTextClipboard();
+    const backend = await this.resolvePasteBackend('auto');
+    if (!backend) {
+      return { ok: false, previousClipboard, error: 'No input automation backend found' };
+    }
+
+    const sendCtrlKey = async (key: 'a' | 'c'): Promise<boolean> => {
+      try {
+        switch (backend) {
+          case 'hyprctl':
+            await execFileAsync('hyprctl', ['dispatch', 'sendshortcut', `CTRL, ${key}, activewindow`], {
+              timeout: 1500,
+            });
+            return true;
+          case 'wtype':
+            await execFileAsync('wtype', ['-M', 'ctrl', '-k', key, '-m', 'ctrl'], { timeout: 1500 });
+            return true;
+          case 'ydotool': {
+            // 29=KEY_LEFTCTRL, 30=KEY_A, 46=KEY_C
+            const code = key === 'a' ? '30' : '46';
+            await execFileAsync('ydotool', ['key', '29:1', `${code}:1`, `${code}:0`, '29:0'], {
+              timeout: 1500,
+            });
+            return true;
+          }
+          case 'xdotool':
+            await execFileAsync('xdotool', ['key', '--clearmodifiers', `ctrl+${key}`], { timeout: 1500 });
+            return true;
+        }
+      } catch {
+        return false;
+      }
+    };
+
+    const sentinel = `__WISPER_FIX_SENTINEL_${Date.now()}__`;
+    await this.copyText(sentinel);
+    await delay(30);
+    if (!(await sendCtrlKey('a'))) {
+      if (previousClipboard !== null) await this.copyText(previousClipboard);
+      return { ok: false, previousClipboard, error: 'Failed to send Ctrl+A' };
+    }
+    await delay(40);
+    if (!(await sendCtrlKey('c'))) {
+      if (previousClipboard !== null) await this.copyText(previousClipboard);
+      return { ok: false, previousClipboard, error: 'Failed to send Ctrl+C' };
+    }
+
+    for (let i = 0; i < 6; i++) {
+      await delay(30);
+      const current = await this.snapshotTextClipboard();
+      if (current !== null && current !== sentinel) {
+        return { ok: true, text: current, previousClipboard };
+      }
+    }
+
+    if (previousClipboard !== null) {
+      await this.copyText(previousClipboard);
+    }
+    return { ok: false, previousClipboard, error: 'No text copied from active input box' };
   }
 
   async pasteText(options: PlatformPasteOptions): Promise<{ ok: boolean; error?: string }> {

@@ -269,6 +269,58 @@ describe('runTextPipeline', () => {
       runStutter('Like try not to get try not to get try not to get stuck'),
       'Like try not to get stuck'
     );
+    assert.equal(
+      runStutter(
+        'I do not want to run a battery driver. I do not want to run a battery driver. I do not want to run a battery driver.'
+      ),
+      'I do not want to run a battery driver.'
+    );
     assert.equal(runStutter('Explain it and blah blah blah.'), 'Explain it and blah blah blah.');
+  });
+
+  it('matches vowel-mutated & sound-alike words against Dictionary targets and window contextTerms', () => {
+    const dictionary = [
+      makeDict('d1', 'maniteja', 'Maniteja'),
+      makeDict('d2', 'omarchy', 'Omarchy'),
+      makeDict('d3', 't3code', 'T3Code'),
+      makeDict('d4', 'sonnet', 'Sonnet'),
+      makeDict('d5', 'haiku', 'Haiku'),
+      makeDict('d6', 'regex', 'regex'),
+      makeDict('d7', 'boilerplate', 'boilerplate'),
+      makeDict('d8', 'graphics card', 'graphics card'),
+      makeDict('d9', 'wisper flow', 'Wisper Flow'),
+      makeDict('d10', 'subagent', 'subagent'),
+      makeDict('d11', 'colab', 'Colab'),
+    ];
+
+    const runPhonetic = (text: string, contextTerms?: string[]) =>
+      runTextPipeline(text, {
+        dictionary,
+        snippets: [],
+        regexRules: [],
+        cleanup: makeCleanup(),
+        contextTerms,
+      }).finalOutput;
+
+    assert.equal(runPhonetic('Hello Mantheja and manitija!'), 'Hello Maniteja and Maniteja!');
+    assert.equal(runPhonetic('I installed Oomachi yesterday.'), 'I installed Omarchy yesterday.');
+    assert.equal(runPhonetic('Open D3 code right now.'), 'Open T3Code right now.');
+    assert.equal(runPhonetic('Switch to Stoornet or high cube.'), 'Switch to Sonnet or Haiku.');
+    assert.equal(runPhonetic('Fix the tree checks in baller plate.'), 'Fix the regex in boilerplate.');
+    assert.equal(runPhonetic('My traffic card is fast.'), 'My graphics card is fast.');
+    assert.equal(runPhonetic('Try whisper flower and whisper float and whisper through.'), 'Try Wisper Flow and Wisper Flow and Wisper Flow.');
+    assert.equal(runPhonetic('Spawn a sub-agent or such patient in collab.'), 'Spawn a subagent or subagent in Colab.');
+
+    // Active window title contextTerms matching (not in dictionary)
+    assert.equal(
+      runPhonetic('Open Antigravty on Neonn.', ['Antigravity', 'Neon']),
+      'Open Antigravity on Neon.'
+    );
+
+    // Must not corrupt normal common English prose
+    assert.equal(
+      runPhonetic('Check the table and label in the normal system report.'),
+      'Check the table and label in the normal system report.'
+    );
   });
 });

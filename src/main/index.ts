@@ -550,6 +550,7 @@ async function bootstrap(): Promise<void> {
         onCancelPressed: () => void stateMachine?.handleCancel(),
         onPasteLastPressed: () => void stateMachine?.handlePasteLast(),
         onCopyLastPressed: () => void stateMachine?.handleCopyLast(),
+        onFixInputPressed: () => void stateMachine?.handleFixInputBox(),
         onDirectPttStart: () => void stateMachine?.handleDirectPttStart(),
         onDirectPttStop: () => void stateMachine?.handleDirectPttStop(),
         onDirectToggle: () => void stateMachine?.handleHandsFreeToggle(),

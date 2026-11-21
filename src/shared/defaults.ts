@@ -110,6 +110,7 @@ export function createDefaultSettings(platform: PlatformKind = process.platform 
           cancel: 'Esc',
           pasteLast: 'Alt+Shift+Z',
           copyLast: 'Alt+Shift+X',
+          fixInputHotkey: 'Alt+F',
         }
       : {
           pushToTalk: 'Ctrl+Win',
@@ -117,6 +118,7 @@ export function createDefaultSettings(platform: PlatformKind = process.platform 
           cancel: 'Esc',
           pasteLast: 'Alt+Shift+Z',
           copyLast: 'Alt+Shift+X',
+          fixInputHotkey: 'Alt+F',
         },
     language: 'English',
     microphoneDeviceId: 'default',

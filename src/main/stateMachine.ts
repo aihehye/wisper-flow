@@ -4,7 +4,9 @@ import { DICTATION_DEBOUNCE_MS, DOUBLE_TAP_WINDOW_MS, MAX_RECORDING_STOP_MS, MAX
 // @ts-ignore Node --experimental-strip-types requires explicit .ts extension
 import { runTextPipeline } from './pipeline/textPipeline.ts';
 // @ts-ignore Node --experimental-strip-types requires explicit .ts extension
-import { scheduleCorrectionWatch } from './pipeline/correctionWatcher.ts';
+import { recordCorrectionSighting, scheduleCorrectionWatch, shouldAutoPromoteCorrection } from './pipeline/correctionWatcher.ts';
+// @ts-ignore Node --experimental-strip-types requires explicit .ts extension
+import { fixKeyboardTypos } from './pipeline/typoFixer.ts';
 import type {
   AppSettings,
   DictionaryEntry,
@@ -56,12 +58,48 @@ const FALLBACK_APP: ForegroundAppInfo = {
   isTerminal: false,
 };
 
+const WINDOW_TITLE_STOPWORDS = new Set([
+  'administrator', 'application', 'browser', 'chrome', 'code', 'command', 'default', 'desktop',
+  'document', 'edge', 'edit', 'explorer', 'file', 'firefox', 'google', 'help', 'home', 'inbox',
+  'microsoft', 'mozilla', 'new', 'open', 'page', 'personal', 'powershell', 'profile', 'prompt',
+  'save', 'search', 'settings', 'studio', 'tab', 'terminal', 'untitled', 'view', 'visual',
+  'window', 'windows', 'work',
+]);
+
 /**
- * Builds deduplicated ASR vocabulary hints from enabled dictionary entries,
- * preferring target spellings (`replacement`) over misheard `phrase` triggers.
+ * Extracts up to `maxTokens` capitalized / CamelCase proper nouns (len >= 4)
+ * from an active window title (e.g., "T3Code", "Antigravity", "Omarchy", "Neon").
+ */
+export function extractWindowContextTokens(windowTitle: string, maxTokens = 10): string[] {
+  if (!windowTitle || maxTokens <= 0) return [];
+
+  const tokens: string[] = [];
+  const seen = new Set<string>();
+  const matches = windowTitle.match(/\b[A-Z][A-Za-z0-9]{3,}\b/g);
+  if (!matches) return [];
+
+  for (const raw of matches) {
+    const lower = raw.toLowerCase();
+    if (WINDOW_TITLE_STOPWORDS.has(lower)) continue;
+    // Skip pure ALL-CAPS short/generic acronyms
+    if (raw.length <= 3 && raw === raw.toUpperCase()) continue;
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    tokens.push(raw);
+    if (tokens.length >= maxTokens) break;
+  }
+
+  return tokens;
+}
+
+/**
+ * Builds deduplicated ASR vocabulary hints from enabled dictionary entries
+ * (excluding <=3-char ALL-CAPS acronyms that over-bias the neural prompt)
+ * plus up to 10 proper nouns extracted from the active window title.
  */
 export function buildDictionaryContextHints(
-  dictionary: ReadonlyArray<Pick<DictionaryEntry, 'enabled' | 'phrase' | 'replacement'>>
+  dictionary: ReadonlyArray<Pick<DictionaryEntry, 'enabled' | 'phrase' | 'replacement'>>,
+  windowTitle?: string
 ): string[] {
   const seen = new Set<string>();
   const hints: string[] = [];
@@ -71,13 +109,69 @@ export function buildDictionaryContextHints(
     const hint = entry.replacement?.trim() || entry.phrase.trim();
     if (!hint) continue;
 
+    // Exclude <= 3 char ALL-CAPS acronyms (UI, UX, CLI, API, CPU, GPU, SSH, SQL)
+    // from the neural Vocabulary: prompt; textPipeline.ts still replaces them deterministically.
+    if (hint.length <= 3 && /^[A-Z0-9]+$/.test(hint) && /[A-Z]/.test(hint)) {
+      continue;
+    }
+
     const normalized = hint.toLowerCase();
     if (seen.has(normalized)) continue;
     seen.add(normalized);
     hints.push(hint);
   }
 
+  if (windowTitle) {
+    for (const token of extractWindowContextTokens(windowTitle, 10)) {
+      const normalized = token.toLowerCase();
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      hints.push(token);
+    }
+  }
+
   return hints;
+}
+
+/**
+ * Detects when an ASR model hallucinates the injected `Vocabulary: ...` system prompt
+ * on silent or near-silent audio instead of transcribing real speech.
+ */
+export function isDictionaryHintEcho(
+  rawText: string,
+  contextHints: readonly string[] | undefined,
+  speechDurationMs: number
+): boolean {
+  const trimmed = rawText.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (/^vocabulary\s*:/i.test(trimmed)) {
+    return true;
+  }
+
+  if (!contextHints || contextHints.length === 0) {
+    return false;
+  }
+
+  if (speechDurationMs >= 250) {
+    return false;
+  }
+
+  const hintSet = new Set(
+    contextHints
+      .map((h) => h.trim().toLowerCase().replace(/[.!?]+$/g, ''))
+      .filter(Boolean)
+  );
+  if (hintSet.size === 0) return false;
+
+  const parts = trimmed
+    .split(/[,;\n]+/)
+    .map((p) => p.trim().toLowerCase().replace(/[.!?]+$/g, ''))
+    .filter(Boolean);
+
+  return parts.length >= 2 && parts.every((p) => hintSet.has(p));
 }
 
 export class DictationStateMachine {
@@ -180,6 +274,21 @@ export class DictationStateMachine {
       payload.toastKind = toast.kind;
     }
     this.deps.sendHudState(payload);
+  }
+
+  showTransientToast(
+    message: string,
+    kind: 'info' | 'warning' | 'error' = 'info',
+    durationMs = 2800
+  ): void {
+    if (this.disposed) return;
+    this.clearSuggestionToastTimer();
+    this.emitHudState({ message, kind });
+    this.suggestionToastTimer = setTimeout(() => {
+      this.suggestionToastTimer = null;
+      if (this.disposed || !this.isIdleState()) return;
+      this.emitHudState();
+    }, durationMs);
   }
 
   private muteAudioIfNeeded(settings: AppSettings): Promise<void> {
@@ -494,9 +603,12 @@ export class DictationStateMachine {
     if (this.disposed || this.sessionId !== activeSessionId) return;
 
     const dictionary = this.deps.db.listDictionary();
-    const contextHints = settings.useDictionaryHints
-      ? buildDictionaryContextHints(dictionary)
-      : undefined;
+    const windowContextTokens = extractWindowContextTokens(capturedApp.title, 10);
+    const hasPreGainSpeech = payload.speechDurationMs > 0;
+    const contextHints =
+      settings.useDictionaryHints && hasPreGainSpeech
+        ? buildDictionaryContextHints(dictionary, capturedApp.title)
+        : undefined;
 
     let rawText = '';
     let detectedLanguage: string | undefined;
@@ -509,7 +621,9 @@ export class DictationStateMachine {
         contextHints,
         micProfile: settings.micProfile,
       });
-      rawText = asrResult.rawText;
+      rawText = isDictionaryHintEcho(asrResult.rawText, contextHints, payload.speechDurationMs)
+        ? ''
+        : asrResult.rawText;
       detectedLanguage = asrResult.detectedLanguage;
       asrUsage = asrResult.usage;
     } catch (err) {
@@ -529,6 +643,7 @@ export class DictationStateMachine {
       regexRules,
       cleanup: settings.cleanup,
       targetAppName: capturedApp.processName,
+      contextTerms: windowContextTokens,
     });
 
     if (trace.matchedDictionaryIds.length > 0) {
@@ -619,6 +734,33 @@ export class DictationStateMachine {
       },
       (candidate) => {
         if (this.disposed) return;
+        const seenCount = recordCorrectionSighting(candidate.phrase, candidate.replacement);
+        const autoPromote = shouldAutoPromoteCorrection(
+          candidate.phrase,
+          candidate.replacement,
+          seenCount
+        );
+
+        if (autoPromote) {
+          const phraseLower = candidate.phrase.trim().toLowerCase();
+          const alreadyExists = this.deps.db
+            .listDictionary()
+            .some((d) => d.phrase.trim().toLowerCase() === phraseLower);
+          if (!alreadyExists && phraseLower !== candidate.replacement.trim().toLowerCase()) {
+            this.deps.db.upsertDictionary({
+              phrase: candidate.phrase,
+              replacement: candidate.replacement,
+              enabled: true,
+            });
+            this.deps.onSuggestionsUpdated?.();
+            this.showTransientToast(
+              `Learned: "${candidate.phrase}" → "${candidate.replacement}"`,
+              'info'
+            );
+            return;
+          }
+        }
+
         const created = this.deps.db.addDictionarySuggestion({
           phrase: candidate.phrase,
           replacement: candidate.replacement,
@@ -626,16 +768,10 @@ export class DictationStateMachine {
         });
         if (created) {
           this.deps.onSuggestionsUpdated?.();
-          this.clearSuggestionToastTimer();
-          this.emitHudState({
-            message: `Suggested: "${candidate.phrase}" → "${candidate.replacement}"`,
-            kind: 'info',
-          });
-          this.suggestionToastTimer = setTimeout(() => {
-            this.suggestionToastTimer = null;
-            if (this.disposed || !this.isIdleState()) return;
-            this.emitHudState();
-          }, 3500);
+          this.showTransientToast(
+            `Suggested: "${candidate.phrase}" → "${candidate.replacement}"`,
+            'info'
+          );
         }
       }
     );
@@ -686,6 +822,61 @@ export class DictationStateMachine {
     await this.deps.platform.copyText(latest.pastedText);
     this.deps.playSound('success');
     this.emitHudState({ message: 'Copied last dictation to clipboard', kind: 'info' });
+  }
+
+  async handleFixInputBox(): Promise<void> {
+    if (this.disposed) return;
+    if (!this.deps.platform.selectAllAndCopy) {
+      this.deps.playSound('alert');
+      this.showTransientToast('Fix Input Box not supported on this platform', 'warning');
+      return;
+    }
+
+    const copied = await this.deps.platform.selectAllAndCopy();
+    if (!copied.ok || !copied.text || !copied.text.trim()) {
+      this.deps.playSound('alert');
+      this.showTransientToast('No text found in active input box', 'info');
+      return;
+    }
+
+    const dictionary = this.deps.db.listDictionary();
+    const fixed = fixKeyboardTypos(copied.text, dictionary);
+
+    if (fixed === copied.text) {
+      if (typeof copied.previousClipboard === 'string') {
+        await this.deps.platform.copyText(copied.previousClipboard);
+      }
+      this.showTransientToast('No typos found', 'info', 2000);
+      return;
+    }
+
+    const settings = this.deps.getSettings();
+    const app = await this.deps.platform.getForegroundApp().catch(() => FALLBACK_APP);
+    const pasteResult = await this.deps.platform.pasteText({
+      text: fixed,
+      restoreClipboard: false,
+      isTerminal: app.isTerminal,
+      terminalMode: settings.terminalPasteMode,
+      linuxPasteBackend: settings.linuxPasteBackend,
+    });
+
+    if (settings.restoreClipboardAfterPaste && typeof copied.previousClipboard === 'string') {
+      const prev = copied.previousClipboard;
+      setTimeout(() => {
+        if (!this.disposed) {
+          void this.deps.platform.copyText(prev).catch(() => {});
+        }
+      }, 240);
+    }
+
+    if (pasteResult.ok) {
+      this.deps.playSound('paste');
+      this.showTransientToast('Fixed typos in input box', 'info', 2200);
+    } else {
+      await this.deps.platform.copyText(fixed);
+      this.deps.playSound('alert');
+      this.showTransientToast('Fixed text copied — press Ctrl+V to paste', 'warning', 3000);
+    }
   }
 
   setHovering(hovering: boolean): void {

@@ -249,6 +249,10 @@ export const HomePage: React.FC<HomePageProps> = ({
           enabled: true,
         });
       }
+      const cleanedCorrected = quickFixText.trim();
+      if (cleanedCorrected) {
+        await window.wisperHub?.setHistoryCorrectedText(entryId, cleanedCorrected);
+      }
       const first = diffs[0];
       const label =
         diffs.length === 1

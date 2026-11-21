@@ -33,6 +33,139 @@ let activeWatchCancel: (() => void) | null = null;
 const DEFAULT_POLL_DELAYS_MS = [3000, 5000, 7000, 9000, 11000];
 const MAX_CHANGED_WORDS = 3;
 
+const UI_PLACEHOLDER_PATTERNS = new Set([
+  'message input',
+  'type a message',
+  'ask anything',
+  'write a message',
+  'send a message',
+  'enter a message',
+  'add a comment',
+  'write a comment',
+  'type something',
+  'search',
+  'search messages',
+  'reply',
+  'write a reply',
+  'message',
+  'chat input',
+  'prompt input',
+]);
+
+const correctionSightings = new Map<string, number>();
+
+export function isUiPlaceholderNoise(text: string): boolean {
+  const normalized = text
+    .trim()
+    .toLowerCase()
+    .replace(/[.…!?:]+$/g, '')
+    .replace(/\s+/g, ' ');
+  return UI_PLACEHOLDER_PATTERNS.has(normalized);
+}
+
+export function isSingleCharPrefixAccident(phrase: string, replacement: string): boolean {
+  const p = phrase.trim();
+  const r = replacement.trim();
+  if (!p || !r) return false;
+  // e.g. "For" -> "tFor", "The" -> "xThe" (lowercase char accidentally typed before capitalized word)
+  if (r.length === p.length + 1 && r.slice(1) === p && /^[a-z][A-Z]/.test(r)) {
+    return true;
+  }
+  // e.g. "tFor" -> "For" (same reversed if pasted had typo? No, user fixing "tFor" -> "For" is valid, only reject introducing a prefix accident)
+  return false;
+}
+
+function normalizePhoneticCode(raw: string): string {
+  return raw
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '')
+    .replace(/ph/g, 'f')
+    .replace(/gh/g, '')
+    .replace(/wh/g, 'w')
+    .replace(/th/g, 't')
+    .replace(/ck/g, 'k')
+    .replace(/sh/g, 's')
+    .replace(/ch/g, 'k')
+    .replace(/x/g, 'ks')
+    .replace(/c(?=[eiy])/g, 's')
+    .replace(/c/g, 'k')
+    .replace(/q/g, 'k')
+    .replace(/z/g, 's')
+    .replace(/d/g, 't')
+    .replace(/v/g, 'f')
+    .replace(/p/g, 'b')
+    .replace(/[aeiouy]/g, '')
+    .replace(/([a-z0-9])\1+/g, '$1');
+}
+
+function levenshteinDistance(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = new Uint16Array(n + 1);
+  let curr = new Uint16Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+    }
+    const tmp = prev;
+    prev = curr;
+    curr = tmp;
+  }
+  return prev[n];
+}
+
+/**
+ * Computes phonetic similarity in [0, 1] combining consonant-skeleton similarity
+ * and character bigram similarity.
+ */
+export function computePhoneticSimilarity(a: string, b: string): number {
+  const s1 = a.trim().toLowerCase();
+  const s2 = b.trim().toLowerCase();
+  if (!s1 || !s2) return 0;
+  if (s1 === s2) return 1;
+
+  const sk1 = normalizePhoneticCode(s1);
+  const sk2 = normalizePhoneticCode(s2);
+  let skelSim = 0;
+  if (sk1.length > 0 && sk2.length > 0) {
+    const maxSk = Math.max(sk1.length, sk2.length);
+    skelSim = 1 - levenshteinDistance(sk1, sk2) / maxSk;
+  }
+
+  const rawMax = Math.max(s1.length, s2.length);
+  const rawSim = 1 - levenshteinDistance(s1, s2) / rawMax;
+  const bgSim = bigramSimilarity(s1, s2);
+
+  return Math.max(skelSim, 0.55 * skelSim + 0.45 * Math.max(rawSim, bgSim));
+}
+
+export function recordCorrectionSighting(phrase: string, replacement: string): number {
+  const key = `${phrase.trim().toLowerCase()}=>${replacement.trim().toLowerCase()}`;
+  const next = (correctionSightings.get(key) ?? 0) + 1;
+  correctionSightings.set(key, next);
+  return next;
+}
+
+export function resetCorrectionSightings(): void {
+  correctionSightings.clear();
+}
+
+export function shouldAutoPromoteCorrection(
+  phrase: string,
+  replacement: string,
+  seenCount = 1
+): boolean {
+  if (seenCount >= 2) return true;
+  return computePhoneticSimilarity(phrase, replacement) >= 0.65;
+}
+
 /**
  * Registers the platform-specific focused-text reader (e.g. WindowsBridge).
  */
@@ -219,6 +352,13 @@ function locateRegion(pTokens: WordToken[], eTokens: WordToken[]): WordToken[] |
   return bestWindow.slice(trimStart, trimEnd);
 }
 
+function isValidCandidate(phrase: string, replacement: string): boolean {
+  if (!phrase || !replacement || phrase === replacement) return false;
+  if (isUiPlaceholderNoise(phrase) || isUiPlaceholderNoise(replacement)) return false;
+  if (isSingleCharPrefixAccident(phrase, replacement)) return false;
+  return true;
+}
+
 /**
  * Extracts 1-to-3 word correction candidates by locating `pastedText` inside
  * `editedText` and diffing word tokens.
@@ -228,6 +368,7 @@ export function extractCorrectionCandidates(
   editedText: string
 ): CorrectionCandidate[] {
   if (!pastedText || !editedText || pastedText === editedText) return [];
+  if (isUiPlaceholderNoise(editedText)) return [];
 
   const pTokens = tokenizeWords(pastedText);
   const eTokens = tokenizeWords(editedText);
@@ -243,7 +384,7 @@ export function extractCorrectionCandidates(
     ) {
       const phrase = pTokens.map((t) => t.word).join(' ');
       const replacement = eTokens.map((t) => t.word).join(' ');
-      if (phrase && replacement && phrase !== replacement) {
+      if (isValidCandidate(phrase, replacement)) {
         return [{ phrase, replacement }];
       }
     }
@@ -273,7 +414,7 @@ export function extractCorrectionCandidates(
         .map((t) => t.word)
         .join(' ');
 
-      if (phrase && replacement && phrase !== replacement) {
+      if (isValidCandidate(phrase, replacement)) {
         candidates.push({ phrase, replacement });
       }
     }
@@ -291,6 +432,7 @@ export function extractCorrectionCandidates(
  */
 export function extractCorrectedFullText(pastedText: string, editedText: string): string | null {
   if (!pastedText || !editedText || pastedText === editedText) return null;
+  if (isUiPlaceholderNoise(editedText)) return null;
   const pTokens = tokenizeWords(pastedText);
   const eTokens = tokenizeWords(editedText);
   if (pTokens.length === 0 || eTokens.length === 0) return null;

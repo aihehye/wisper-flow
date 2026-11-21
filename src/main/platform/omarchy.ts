@@ -25,6 +25,7 @@ const DEFAULT_LINUX_SHORTCUTS: ShortcutsConfig = {
   cancel: 'Esc',
   pasteLast: 'Alt+Shift+Z',
   copyLast: 'Alt+Shift+X',
+  fixInputHotkey: 'Alt+F',
 };
 
 function stripTomlValue(rawValue: string): string {

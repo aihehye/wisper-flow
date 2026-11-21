@@ -7,11 +7,15 @@ import type { GpuDeviceInfo, ModelStatus } from '../../shared/types';
 import type { AsrBackend, TokenUsage, TranscribeRequest, TranscribeResult } from './types';
 import { getLlamaServerBinaryPath, getModelPaths } from './modelManager';
 import {
+  applyHighPassWav,
+  applySpeechEqWav,
   compactInternalSilenceWav,
+  computeWavStats,
   DEFAULT_MAX_CHUNK_SEC,
   DEFAULT_MIN_CHUNK_SEC,
   encodePcm16MonoWav,
   getSilenceRmsThreshold,
+  hasActiveSpeechWav,
   splitWavIntoChunks,
   trimSilenceWav,
 } from './wavUtils';
@@ -531,10 +535,19 @@ export class LlamaServerBackend implements AsrBackend {
     }
 
     const t0 = performance.now();
+    const highPassed = applyHighPassWav(req.wavBuffer);
     const rmsThreshold = getSilenceRmsThreshold(req.micProfile ?? 'quiet');
-    const trimmed = trimSilenceWav(req.wavBuffer, 80, 110, rmsThreshold);
+    if (!hasActiveSpeechWav(highPassed, rmsThreshold)) {
+      return {
+        rawText: '',
+        asrLatencyMs: Math.round(performance.now() - t0),
+      };
+    }
+
+    const trimmed = trimSilenceWav(highPassed, 80, 110, rmsThreshold);
     const compacted = compactInternalSilenceWav(trimmed, { rmsThreshold });
-    const chunks = splitWavIntoChunks(compacted, DEFAULT_MAX_CHUNK_SEC, DEFAULT_MIN_CHUNK_SEC);
+    const preprocessed = applySpeechEqWav(compacted, { includeHighPass: false });
+    const chunks = splitWavIntoChunks(preprocessed, DEFAULT_MAX_CHUNK_SEC, DEFAULT_MIN_CHUNK_SEC);
 
     const texts: string[] = [];
     let detectedLanguage: string | undefined;
@@ -623,13 +636,22 @@ export class LlamaServerBackend implements AsrBackend {
       chatTemplateKwargs.language = req.language;
     }
 
+    const chunkSec = computeWavStats(chunkWav).durationMs / 1000;
+    const maxTokens = Math.min(1024, Math.max(128, Math.ceil(chunkSec * 8)));
+
     const res = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         messages,
         temperature: 0,
-        max_tokens: 1024,
+        max_tokens: maxTokens,
+        repeat_penalty: 1.05,
+        repeat_last_n: 64,
+        dry_multiplier: 0.8,
+        dry_base: 1.75,
+        dry_allowed_length: 4,
+        dry_penalty_last_n: 128,
         chat_template_kwargs: chatTemplateKwargs,
       }),
     });

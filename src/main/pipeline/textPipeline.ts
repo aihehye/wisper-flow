@@ -12,6 +12,7 @@ export interface TextPipelineOptions {
   regexRules: RegexRuleEntry[];
   cleanup: CleanupOptions;
   targetAppName?: string;
+  contextTerms?: string[];
 }
 
 interface InlineRule {
@@ -36,7 +37,7 @@ const STUTTER_PAIR_RE = new RegExp(
   'giu'
 );
 const STUTTER_PHRASE_RE = new RegExp(
-  `${STUTTER_BOUNDARY_BEFORE}(${WORD_TOKEN}(?:[ \\t]+${WORD_TOKEN}){2,5})(?:(?:[.,][ \\t]*|[ \\t]+)\\1)+${STUTTER_BOUNDARY_AFTER}`,
+  `${STUTTER_BOUNDARY_BEFORE}(${WORD_TOKEN}(?:[ \\t]+${WORD_TOKEN}){2,18})(?:(?:[.,!?][ \\t]*|[ \\t]+)\\1)+${STUTTER_BOUNDARY_AFTER}`,
   'giu'
 );
 const STUTTER_IDIOM_ALLOWLIST = new Set(['blah']);
@@ -179,6 +180,441 @@ function applyDeterministicCleanup(
   return out;
 }
 
+const COMMON_SINGLE_WORDS = new Set([
+  'about', 'above', 'after', 'again', 'against', 'almost', 'alone', 'along', 'already', 'always',
+  'among', 'another', 'answer', 'around', 'asked', 'asking', 'based', 'became', 'because', 'become',
+  'before', 'began', 'begin', 'being', 'below', 'better', 'between', 'black', 'bring', 'build',
+  'built', 'called', 'calling', 'cannot', 'carry', 'cause', 'center', 'change', 'check', 'child',
+  'class', 'clear', 'close', 'coming', 'common', 'could', 'course', 'create', 'current', 'default',
+  'doing', 'during', 'early', 'earth', 'email', 'empty', 'enough', 'enter', 'error', 'every',
+  'example', 'exist', 'family', 'field', 'files', 'final', 'first', 'focus', 'follow', 'force',
+  'found', 'frame', 'front', 'fully', 'given', 'giving', 'going', 'great', 'green', 'group',
+  'hands', 'happy', 'having', 'heard', 'heart', 'heavy', 'hello', 'helps', 'hence', 'history',
+  'hours', 'house', 'human', 'image', 'index', 'input', 'inside', 'issue', 'items', 'keeps',
+  'known', 'label', 'large', 'later', 'learn', 'least', 'leave', 'level', 'light', 'limit',
+  'lines', 'links', 'lists', 'little', 'local', 'logic', 'longer', 'looking', 'lower', 'major',
+  'makes', 'making', 'match', 'matter', 'maybe', 'means', 'media', 'merge', 'might', 'minor',
+  'model', 'money', 'month', 'morning', 'mouse', 'moved', 'moving', 'music', 'named', 'names',
+  'needs', 'never', 'newer', 'night', 'noise', 'normal', 'north', 'notes', 'nothing', 'number',
+  'often', 'older', 'opens', 'order', 'other', 'output', 'owner', 'pages', 'panel', 'paper',
+  'parts', 'party', 'paste', 'patch', 'paths', 'pause', 'peace', 'people', 'phase', 'phone',
+  'photo', 'piece', 'place', 'plain', 'plans', 'plate', 'plays', 'please', 'point', 'power',
+  'press', 'price', 'print', 'prior', 'process', 'project', 'prompt', 'public', 'pulse', 'query',
+  'quick', 'quiet', 'quite', 'radio', 'raise', 'range', 'rapid', 'ratio', 'reach', 'reads',
+  'ready', 'really', 'reason', 'record', 'render', 'reply', 'report', 'reset', 'result', 'return',
+  'review', 'right', 'river', 'rough', 'round', 'route', 'rules', 'running', 'saved', 'saving',
+  'scale', 'scene', 'scope', 'score', 'screen', 'script', 'search', 'second', 'section', 'seems',
+  'select', 'sense', 'serve', 'server', 'setup', 'seven', 'shall', 'shape', 'share', 'sharp',
+  'sheet', 'shell', 'shift', 'shine', 'short', 'should', 'shown', 'shows', 'sides', 'sight',
+  'signal', 'silent', 'simple', 'since', 'single', 'sites', 'sized', 'sizes', 'skill', 'sleep',
+  'slice', 'slide', 'small', 'smart', 'smile', 'smoke', 'smooth', 'solid', 'solve', 'something',
+  'sorry', 'sound', 'source', 'south', 'space', 'speak', 'speed', 'spend', 'spent', 'split',
+  'spoken', 'sport', 'stack', 'staff', 'stage', 'stand', 'start', 'state', 'status', 'stays',
+  'steam', 'steel', 'steps', 'stick', 'still', 'stock', 'stone', 'stood', 'stops', 'store',
+  'storm', 'story', 'strip', 'strong', 'stuck', 'study', 'stuff', 'style', 'sugar', 'suite',
+  'super', 'supply', 'surely', 'sweet', 'swift', 'swing', 'switch', 'system', 'table', 'taken',
+  'takes', 'taking', 'talks', 'target', 'tasks', 'taste', 'teach', 'teams', 'terms', 'tests',
+  'thank', 'their', 'theme', 'there', 'these', 'thick', 'thing', 'think', 'third', 'those',
+  'three', 'throw', 'tight', 'timed', 'timer', 'times', 'title', 'today', 'token', 'tones',
+  'tools', 'topic', 'total', 'touch', 'tough', 'tower', 'trace', 'track', 'trade', 'train',
+  'trash', 'treat', 'trees', 'trend', 'trial', 'trick', 'tried', 'tries', 'truck', 'truly',
+  'trust', 'truth', 'trying', 'turns', 'twice', 'typed', 'types', 'under', 'union', 'units',
+  'unity', 'until', 'upper', 'urban', 'usage', 'users', 'using', 'usual', 'valid', 'value',
+  'video', 'views', 'virus', 'visit', 'vital', 'voice', 'votes', 'waits', 'walks', 'walls',
+  'wants', 'watch', 'water', 'waves', 'weeks', 'weigh', 'weird', 'where', 'which', 'while',
+  'white', 'whole', 'whose', 'wider', 'width', 'winds', 'window', 'wings', 'wires', 'woman',
+  'women', 'words', 'works', 'world', 'worry', 'worse', 'worst', 'worth', 'would', 'wound',
+  'write', 'wrong', 'wrote', 'years', 'yield', 'young', 'yours', 'youth',
+]);
+
+interface PhoneticTarget {
+  id?: string;
+  replacement: string;
+  normalized: string;
+  skeleton: string;
+  wordCount: number;
+  firstWordSkeleton: string;
+  lastWordSkeleton: string;
+  startsWithVowel: boolean;
+}
+
+const VOWEL_RE = /[aeiouy]/;
+
+export function toPhoneticSkeleton(raw: string): string {
+  let s = raw
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '');
+  if (!s) return '';
+
+  // Phonetic cluster & voicing normalizations
+  s = s
+    .replace(/ph/g, 'f')
+    .replace(/gh/g, '')
+    .replace(/wh/g, 'w')
+    .replace(/kn/g, 'n')
+    .replace(/wr/g, 'r')
+    .replace(/th/g, 't')
+    .replace(/ck/g, 'k')
+    .replace(/sh/g, 's')
+    .replace(/ti(?=[aeiou])/g, 's')
+    .replace(/ch/g, 'j')
+    .replace(/x/g, 'ks')
+    .replace(/c(?=[eiy])/g, 's')
+    .replace(/c/g, 'k')
+    .replace(/q/g, 'k')
+    .replace(/g(?=[eiy])/g, 'j')
+    .replace(/z/g, 's')
+    .replace(/d/g, 't')
+    .replace(/v/g, 'f')
+    .replace(/p/g, 'b');
+
+  // Strip vowels & collapse adjacent duplicate consonants/digits
+  s = s.replace(/[aeiouy]/g, '').replace(/([a-z0-9])\1+/g, '$1');
+  return s;
+}
+
+function phoneticSubCost(a: string, b: string): number {
+  if (a === b) return 0;
+  // Soft fricative / sibilant / affricate / velar confusion pairs in whispered speech
+  const pair = a < b ? `${a}${b}` : `${b}${a}`;
+  if (
+    pair === 'jk' ||
+    pair === 'js' ||
+    pair === 'ks' ||
+    pair === 'gk' ||
+    pair === 'bf' ||
+    pair === 'ft' ||
+    pair === 'lr' ||
+    pair === 'mn'
+  ) {
+    return 0.5;
+  }
+  return 1;
+}
+
+function weightedEditDistance(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+
+  let prev = new Float64Array(n + 1);
+  let curr = new Float64Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    const ai = a[i - 1];
+    for (let j = 1; j <= n; j++) {
+      const bj = b[j - 1];
+      const cost = phoneticSubCost(ai, bj);
+      const del = prev[j] + 1;
+      const ins = curr[j - 1] + 1;
+      const sub = prev[j - 1] + cost;
+      let best = del < ins ? del : ins;
+      if (sub < best) best = sub;
+      curr[j] = best;
+    }
+    const tmp = prev;
+    prev = curr;
+    curr = tmp;
+  }
+
+  return prev[n];
+}
+
+const FUNCTION_LEAD_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by', 'do', 'for', 'from', 'go',
+  'has', 'have', 'he', 'hello', 'hey', 'hi', 'his', 'i', 'if', 'in', 'into', 'is', 'it',
+  'me', 'my', 'no', 'not', 'of', 'on', 'open', 'or', 'our', 'she', 'so', 'that', 'the',
+  'their', 'them', 'then', 'there', 'they', 'this', 'to', 'try', 'up', 'use', 'was',
+  'we', 'were', 'what', 'when', 'who', 'will', 'with', 'you', 'your',
+]);
+
+function scorePhoneticMatch(
+  spanWords: string[],
+  target: PhoneticTarget
+): number {
+  // Never fuzzy-match code identifiers containing underscores
+  if (spanWords.some((w) => w.includes('_'))) return 0;
+
+  const spanRaw = spanWords.join(' ');
+  const spanNorm = spanRaw.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!spanNorm || spanNorm.length < 4) return 0;
+
+  // Already exact case-insensitive match -> snap casing directly
+  if (spanNorm === target.normalized) {
+    return spanRaw === target.replacement ? 0 : 1.0;
+  }
+
+  // Reject single common English words from fuzzy replacement unless exact normalized match
+  if (spanWords.length === 1 && COMMON_SINGLE_WORDS.has(spanWords[0].toLowerCase())) {
+    return 0;
+  }
+
+  // Never let a 2-word span start with a common function/greeting word unless the target itself starts with it
+  if (spanWords.length >= 2) {
+    const leadLower = spanWords[0].toLowerCase();
+    const targetLead = target.replacement.split(/[\s-]+/)[0]?.toLowerCase() ?? '';
+    if (FUNCTION_LEAD_WORDS.has(leadLower) && leadLower !== targetLead) {
+      return 0;
+    }
+  }
+
+  const spanSkel = toPhoneticSkeleton(spanRaw);
+  const tgtSkel = target.skeleton;
+  if (!spanSkel || !tgtSkel) return 0;
+
+  // 1-consonant proper nouns (e.g. "Neon" -> skeleton "n"): only allow exact skeleton + raw edit distance <= 1
+  if (tgtSkel.length < 2) {
+    if (spanSkel !== tgtSkel) return 0;
+    const rawDist = weightedEditDistance(spanNorm, target.normalized);
+    return rawDist <= 1 ? 0.92 : 0;
+  }
+  if (spanSkel.length < 2) return 0;
+
+  // Length ratio sanity check
+  const maxNormLen = Math.max(spanNorm.length, target.normalized.length);
+  const minNormLen = Math.min(spanNorm.length, target.normalized.length);
+  if (minNormLen / maxNormLen < 0.45) return 0;
+
+  const maxSkelLen = Math.max(spanSkel.length, tgtSkel.length);
+  if (Math.abs(spanSkel.length - tgtSkel.length) > Math.max(2, Math.floor(maxSkelLen * 0.45))) {
+    return 0;
+  }
+
+  const skelDist = weightedEditDistance(spanSkel, tgtSkel);
+  const skelSim = 1 - skelDist / maxSkelLen;
+
+  // Exact consonant skeleton match
+  if (skelDist === 0) {
+    if (tgtSkel.length <= 2) {
+      const rawDist = weightedEditDistance(spanNorm, target.normalized);
+      if (rawDist > 2) return 0;
+    }
+    return 0.96;
+  }
+
+  // Multi-word target where first OR last word is already a phonetic hit
+  // (e.g. "whisper flower" -> "Wisper Flow", "traffic card" -> "graphics card")
+  if (target.wordCount >= 2 && spanWords.length >= 2) {
+    const firstSkel = toPhoneticSkeleton(spanWords[0]);
+    if (firstSkel && firstSkel === target.firstWordSkeleton && skelSim >= 0.65) {
+      return Math.min(0.95, skelSim + 0.12);
+    }
+    const lastSkel = toPhoneticSkeleton(spanWords[spanWords.length - 1]);
+    if (lastSkel && lastSkel === target.lastWordSkeleton && skelSim >= 0.6) {
+      return Math.min(0.95, skelSim + 0.15);
+    }
+  }
+
+  // Do not let a single word expand into a multi-word target unless its consonant skeleton is identical
+  // (prevents "able" inside "able to" from re-expanding to "able to to").
+  if (target.wordCount >= 2 && spanWords.length === 1) {
+    const firstWordLower = target.replacement.split(/[\s-]+/)[0]?.toLowerCase() ?? '';
+    if (spanWords[0].toLowerCase() === firstWordLower) {
+      return 0;
+    }
+  }
+
+  // High consonant-skeleton similarity with edge/vowel-class confirmation
+  const spanStartsVowel = VOWEL_RE.test(spanNorm[0] ?? '');
+  const startsSame =
+    spanSkel[0] === tgtSkel[0] ||
+    (spanStartsVowel && target.startsWithVowel && spanNorm[0] === target.normalized[0]);
+  const endsSame =
+    spanSkel[spanSkel.length - 1] === tgtSkel[tgtSkel.length - 1] ||
+    spanNorm.slice(-2) === target.normalized.slice(-2);
+
+  if (skelSim >= 0.72 && startsSame && endsSame) {
+    return skelSim;
+  }
+
+  if (skelSim >= 0.75 && (startsSame || endsSame)) {
+    return skelSim;
+  }
+
+  // Slightly looser threshold for 1-edit short skeletons (e.g. "Oomachi" -> "Omarchy", "high cube" -> "Haiku")
+  if (skelDist <= 1 && startsSame && spanSkel.length >= 2 && tgtSkel.length >= 2) {
+    const cleanSpan = spanNorm.replace(/gh/g, '');
+    const cleanTgt = target.normalized.replace(/gh/g, '');
+    const cleanMax = Math.max(cleanSpan.length, cleanTgt.length);
+    const rawSim = 1 - weightedEditDistance(cleanSpan, cleanTgt) / cleanMax;
+    if (rawSim >= 0.45 || (spanWords.length >= 2 && spanSkel.startsWith(tgtSkel))) {
+      return 0.76;
+    }
+  }
+
+  // Longer / multi-word phonetic approximations (e.g. "Stoornet" -> "Sonnet", "such patient" -> "subagent")
+  if (skelSim >= 0.6 && startsSame && endsSame) {
+    const rawSim = 1 - weightedEditDistance(spanNorm, target.normalized) / maxNormLen;
+    if (rawSim >= 0.45) {
+      return 0.74;
+    }
+  }
+
+  // 2-word phonetic mishearing of a 1-word technical term where leading consonant shifts (e.g. "tree checks" -> "regex")
+  if (
+    spanWords.length >= 2 &&
+    skelSim >= 0.6 &&
+    endsSame &&
+    spanSkel.length >= 4 &&
+    tgtSkel.length >= 4 &&
+    spanSkel.slice(0, 2).includes(tgtSkel[0])
+  ) {
+    const rawSim = 1 - weightedEditDistance(spanNorm, target.normalized) / maxNormLen;
+    if (rawSim >= 0.35) {
+      return 0.73;
+    }
+  }
+
+  return 0;
+}
+
+function applyPhoneticDictionaryMatching(
+  text: string,
+  dictionary: DictionaryEntry[],
+  contextTerms: string[] | undefined,
+  matchedDictionaryIds: Set<string>
+): string {
+  const targets: PhoneticTarget[] = [];
+  const seenTargets = new Set<string>();
+
+  const addTarget = (raw: string, id?: string, minLen = 5) => {
+    const replacement = raw.trim();
+    if (!replacement) return;
+    const normalized = replacement.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (normalized.length < minLen) return;
+    if (seenTargets.has(normalized)) return;
+    const skeleton = toPhoneticSkeleton(replacement);
+    if (skeleton.length < 1) return;
+    seenTargets.add(normalized);
+    const words = replacement.split(/[\s-]+/).filter(Boolean);
+    targets.push({
+      id,
+      replacement,
+      normalized,
+      skeleton,
+      wordCount: words.length,
+      firstWordSkeleton: words.length > 0 ? toPhoneticSkeleton(words[0]) : skeleton,
+      lastWordSkeleton: words.length > 0 ? toPhoneticSkeleton(words[words.length - 1]) : skeleton,
+      startsWithVowel: VOWEL_RE.test(normalized[0] ?? ''),
+    });
+  };
+
+  for (const entry of dictionary) {
+    if (!entry.enabled) continue;
+    const targetWord = entry.replacement?.trim() || entry.phrase.trim();
+    addTarget(targetWord, entry.id, 5);
+  }
+
+  if (contextTerms) {
+    for (const term of contextTerms) {
+      addTarget(term, undefined, 4);
+    }
+  }
+
+  if (targets.length === 0) return text;
+
+  // Tokenize preserving exact character offsets so punctuation & whitespace remain intact.
+  interface SpanToken {
+    raw: string;
+    core: string;
+    lead: string;
+    trail: string;
+    start: number;
+    end: number;
+  }
+
+  const tokens: SpanToken[] = [];
+  const tokenRe = /\S+/g;
+  let m: RegExpExecArray | null;
+  while ((m = tokenRe.exec(text)) !== null) {
+    const raw = m[0];
+    const leadMatch = raw.match(/^[^\p{L}\p{N}]+/u);
+    const trailMatch = raw.match(/[^\p{L}\p{N}]+$/u);
+    const lead = leadMatch ? leadMatch[0] : '';
+    const trail = trailMatch && trailMatch[0].length < raw.length - lead.length ? trailMatch[0] : '';
+    const core = raw.slice(lead.length, raw.length - trail.length);
+    tokens.push({
+      raw,
+      core,
+      lead,
+      trail,
+      start: m.index,
+      end: m.index + raw.length,
+    });
+  }
+
+  if (tokens.length === 0) return text;
+
+  let out = '';
+  let cursor = 0;
+  let i = 0;
+
+  while (i < tokens.length) {
+    let bestTarget: PhoneticTarget | null = null;
+    let bestScore = 0;
+    let bestSpanLen = 1;
+
+    // Try 2-word spans first (handles "D3 code" -> "T3Code", "baller plate" -> "boilerplate", "whisper flower" -> "Wisper Flow")
+    // only if there is no hard sentence punctuation between the two tokens.
+    if (
+      i + 1 < tokens.length &&
+      tokens[i].core.length > 0 &&
+      tokens[i + 1].core.length > 0 &&
+      !/[.!?;:\n]/.test(tokens[i].trail) &&
+      !/[\r\n]/.test(text.slice(tokens[i].end, tokens[i + 1].start))
+    ) {
+      const twoWords = [tokens[i].core, tokens[i + 1].core];
+      for (const tgt of targets) {
+        const score = scorePhoneticMatch(twoWords, tgt);
+        if (score > bestScore) {
+          // Do not swallow tokens[i] if tokens[i + 1] alone is already a stronger match for tgt
+          const secondAlone = scorePhoneticMatch([tokens[i + 1].core], tgt);
+          if (secondAlone >= score) continue;
+          bestScore = score;
+          bestTarget = tgt;
+          bestSpanLen = 2;
+        }
+      }
+    }
+
+    // Try 1-word span (also handles hyphenated tokens like "sub-agent")
+    if (tokens[i].core.length > 0) {
+      const oneWord = [tokens[i].core];
+      for (const tgt of targets) {
+        const score = scorePhoneticMatch(oneWord, tgt);
+        // Prefer exact 1-word hit over 2-word fuzzy hit if stronger
+        if (score > bestScore) {
+          bestScore = score;
+          bestTarget = tgt;
+          bestSpanLen = 1;
+        }
+      }
+    }
+
+    if (bestTarget && bestScore >= 0.72) {
+      const firstTok = tokens[i];
+      const lastTok = tokens[i + bestSpanLen - 1];
+      out += text.slice(cursor, firstTok.start);
+      out += `${firstTok.lead}${bestTarget.replacement}${lastTok.trail}`;
+      cursor = lastTok.end;
+      if (bestTarget.id) {
+        matchedDictionaryIds.add(bestTarget.id);
+      }
+      i += bestSpanLen;
+    } else {
+      i += 1;
+    }
+  }
+
+  out += text.slice(cursor);
+  return out;
+}
+
 export function validateRegexPattern(
   pattern: string,
   flags: string
@@ -277,6 +713,14 @@ export function runTextPipeline(
         return rule.replacement;
       });
     }
+
+    // Step 3b: Vowel-stripped consonant-skeleton phonetic fuzzy matcher for Dictionary targets & active window context.
+    afterDictionaryAndInlineSnippets = applyPhoneticDictionaryMatching(
+      afterDictionaryAndInlineSnippets,
+      opts.dictionary,
+      opts.contextTerms,
+      matchedDictionaryIds
+    );
   }
 
   // Step 4: Ordered user Regex Rules.

@@ -8,7 +8,7 @@ import { AppDatabase } from '../src/main/storage/db.ts';
 // @ts-ignore Node --experimental-strip-types requires explicit .ts extension
 import { computeUsageStats } from '../src/main/storage/stats.ts';
 // @ts-ignore Node --experimental-strip-types requires explicit .ts extension
-import { buildDictionaryContextHints, DictationStateMachine } from '../src/main/stateMachine.ts';
+import { buildDictionaryContextHints, DictationStateMachine, extractWindowContextTokens, isDictionaryHintEcho } from '../src/main/stateMachine.ts';
 import type { AsrBackend, TranscribeRequest, TranscribeResult } from '../src/main/asr/types';
 import type {
   ForegroundAppInfo,
@@ -520,5 +520,73 @@ describe('buildDictionaryContextHints', () => {
     ]);
 
     assert.deepEqual(hints, ['Boilerplate', 'Wispr Flow', 'kubectl', 'Notion']);
+  });
+
+  it('excludes <=3-char ALL-CAPS acronyms from neural Vocabulary prompt and includes active window proper nouns', () => {
+    const hints = buildDictionaryContextHints(
+      [
+        { enabled: true, phrase: 'ui', replacement: 'UI' },
+        { enabled: true, phrase: 'ux', replacement: 'UX' },
+        { enabled: true, phrase: 'cli', replacement: 'CLI' },
+        { enabled: true, phrase: 'api', replacement: 'API' },
+        { enabled: true, phrase: 'cpu', replacement: 'CPU' },
+        { enabled: true, phrase: 'gpu', replacement: 'GPU' },
+        { enabled: true, phrase: 'ssh', replacement: 'SSH' },
+        { enabled: true, phrase: 'sql', replacement: 'SQL' },
+        { enabled: true, phrase: 'wisper flow', replacement: 'Wisper Flow' },
+      ],
+      'T3Code - Antigravity on Omarchy (Neon) - Google Chrome'
+    );
+
+    assert.deepEqual(hints, ['Wisper Flow', 'T3Code', 'Antigravity', 'Omarchy', 'Neon']);
+    assert.deepEqual(
+      extractWindowContextTokens('T3Code - Antigravity on Omarchy (Neon) - Visual Studio Code'),
+      ['T3Code', 'Antigravity', 'Omarchy', 'Neon']
+    );
+  });
+});
+
+describe('isDictionaryHintEcho & zero-speech hint suppression', () => {
+  it('flags Vocabulary: prefix and multi-hint hallucinations on near-silent audio without dropping real speech', () => {
+    const hints = ['Wisper Flow', 'Kubernetes', 'Poco X7 Pro'];
+    assert.equal(isDictionaryHintEcho('Vocabulary: Wisper Flow, Kubernetes', hints, 500), true);
+    assert.equal(isDictionaryHintEcho('Wisper Flow, Kubernetes.', hints, 0), true);
+    assert.equal(isDictionaryHintEcho('Wisper Flow, Kubernetes.', hints, 120), true);
+    assert.equal(isDictionaryHintEcho('Wisper Flow', hints, 120), false);
+    assert.equal(isDictionaryHintEcho('Wisper Flow, Kubernetes.', hints, 400), false);
+    assert.equal(isDictionaryHintEcho('Check my Kubernetes cluster.', hints, 0), false);
+  });
+
+  it('omits contextHints when speechDurationMs is 0 and does not paste dictionary echoes', async (t) => {
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+    const h = createHarness({
+      asrText: 'Vocabulary: kubectl, Wisper Flow',
+    });
+
+    try {
+      h.db.upsertDictionary({ phrase: 'kubectl', replacement: null });
+      h.db.upsertDictionary({ phrase: 'wisper flow', replacement: 'Wisper Flow' });
+
+      await h.sm.handlePttDown();
+      const startCmd = h.recordCommands.find((c) => c.action === 'start');
+      assert.ok(startCmd?.sessionId);
+
+      t.mock.timers.tick(650);
+      await h.sm.handlePttUp();
+
+      await h.sm.handleAudioSubmitted({
+        sessionId: startCmd.sessionId,
+        wavBuffer: Buffer.from([1, 2, 3, 4]),
+        speechDurationMs: 0,
+        totalDurationMs: 650,
+        isSilent: false,
+      });
+
+      assert.equal(h.transcribeCalls.length, 1);
+      assert.equal(h.transcribeCalls[0].contextHints, undefined);
+      assert.equal(h.pasteCalls.length, 0);
+    } finally {
+      h.cleanup();
+    }
   });
 });

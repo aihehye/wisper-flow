@@ -34,14 +34,18 @@ module.registerHooks({
 const { createDefaultSettings } = await import('../src/shared/defaults');
 const {
   RollingPreRollBuffer,
-  computeGentleWhisperGain,
+  computeActiveSpeechRms,
+  computeActiveSpeechWhisperGain,
+  computeWhisperGainFromRms,
   createAudioConstraints,
   resampleFloat32,
+  softLimitSample,
   PRE_ROLL_MS,
+  SOFT_LIMITER_CEILING,
+  SOFT_LIMITER_THRESHOLD,
   TAIL_DRAIN_MS,
   WHISPER_MAX_GAIN,
-  WHISPER_PEAK_THRESHOLD,
-  WHISPER_TARGET_PEAK,
+  WHISPER_TARGET_RMS,
 } = await import('../src/renderer/hud/micCapture');
 
 test('createDefaultSettings sets whisperModeBoost to false and micProfile to quiet', () => {
@@ -51,14 +55,14 @@ test('createDefaultSettings sets whisperModeBoost to false and micProfile to qui
   assert.equal(createDefaultSettings('linux').micProfile, 'quiet');
 });
 
-test('createAudioConstraints configures echoCancellation/noiseSuppression by micProfile', () => {
+test('createAudioConstraints configures WebRTC DSP flags by micProfile', () => {
   const quiet = createAudioConstraints('default', 'quiet');
   assert.deepEqual(quiet, {
     audio: {
       channelCount: 1,
       echoCancellation: false,
       noiseSuppression: false,
-      autoGainControl: true,
+      autoGainControl: false,
     },
     video: false,
   });
@@ -106,38 +110,85 @@ test('RollingPreRollBuffer handles single chunk larger than maxSamples and clear
   assert.deepEqual(buf.drain(), []);
 });
 
-test('computeGentleWhisperGain only boosts genuinely quiet non-zero audio', () => {
-  assert.equal(computeGentleWhisperGain(0.05, false), 1);
-  assert.equal(computeGentleWhisperGain(0, true), 1);
-  assert.equal(computeGentleWhisperGain(WHISPER_PEAK_THRESHOLD, true), 1);
-  assert.equal(computeGentleWhisperGain(0.4, true), 1);
+test('computeWhisperGainFromRms targets -20 dBFS RMS with [1.0, 8.0] bounds', () => {
+  assert.equal(WHISPER_TARGET_RMS, 0.1);
+  assert.equal(WHISPER_MAX_GAIN, 8.0);
+  assert.equal(computeWhisperGainFromRms(0.02, false), 1);
+  assert.equal(computeWhisperGainFromRms(0, true), 1);
+  assert.equal(computeWhisperGainFromRms(WHISPER_TARGET_RMS, true), 1);
+  assert.equal(computeWhisperGainFromRms(0.25, true), 1);
 
-  // Quiet audio (0.10) is normalized toward WHISPER_TARGET_PEAK (0.50 -> 5x)
-  assert.ok(Math.abs(computeGentleWhisperGain(0.1, true) - WHISPER_TARGET_PEAK / 0.1) < 1e-6);
+  // Quiet speech at 0.02 RMS -> 5x boost to reach 0.10 (-20 dBFS)
+  assert.ok(Math.abs(computeWhisperGainFromRms(0.02, true) - 5.0) < 1e-6);
 
-  // Ultra-quiet noise floor is capped at WHISPER_MAX_GAIN
-  assert.equal(computeGentleWhisperGain(0.001, true), WHISPER_MAX_GAIN);
+  // Ultra-quiet speech is capped at WHISPER_MAX_GAIN (8.0x)
+  assert.equal(computeWhisperGainFromRms(0.005, true), WHISPER_MAX_GAIN);
+});
+
+test('softLimitSample passes signals <= 0.75 linearly and soft-limits peaks <= 0.95', () => {
+  assert.equal(softLimitSample(0), 0);
+  assert.equal(softLimitSample(0.5), 0.5);
+  assert.equal(softLimitSample(-0.75), -0.75);
+
+  const posPeak = softLimitSample(1.0);
+  const negPeak = softLimitSample(-1.0);
+  assert.ok(posPeak > SOFT_LIMITER_THRESHOLD && posPeak <= SOFT_LIMITER_CEILING);
+  assert.ok(negPeak < -SOFT_LIMITER_THRESHOLD && negPeak >= -SOFT_LIMITER_CEILING);
+
+  // Extreme transients still never exceed 0.95 ceiling
+  assert.ok(softLimitSample(8.0) <= SOFT_LIMITER_CEILING);
+  assert.ok(softLimitSample(-8.0) >= -SOFT_LIMITER_CEILING);
+});
+
+test('single 1.0 peak click does NOT kill whisper boost and gets soft-limited <= 0.95', () => {
+  const sr = 16000;
+  // 400ms of leading silence + 400ms of quiet whisper (0.02 RMS) with a single 1.0 click sample
+  const samples = new Float32Array(Math.round(sr * 0.8));
+  const speechStart = Math.round(sr * 0.4);
+  for (let i = speechStart; i < samples.length; i += 1) {
+    // 300 Hz sine with peak 0.0283 -> RMS ~0.02
+    samples[i] = 0.028284 * Math.sin((2 * Math.PI * 300 * i) / sr);
+  }
+  samples[speechStart + 100] = 1.0; // Single-sample 1.0 click!
+
+  const activeRms = computeActiveSpeechRms(samples, sr);
+  assert.ok(activeRms > 0.018 && activeRms < 0.025, `Expected ~0.02 active RMS, got ${activeRms}`);
+
+  const gain = computeActiveSpeechWhisperGain(samples, sr, true);
+  assert.ok(gain > 4.0 && gain <= 5.5, `Expected ~5x gain despite 1.0 click, got ${gain}`);
+
+  const res = resampleFloat32([samples], sr, sr, true);
+  assert.ok(res.peak <= SOFT_LIMITER_CEILING, `Expected peak <= 0.95, got ${res.peak}`);
+  for (let i = 0; i < res.pcm.length; i += 1) {
+    assert.ok(Math.abs(res.pcm[i]) <= SOFT_LIMITER_CEILING);
+  }
 });
 
 test('resampleFloat32 computes speechDurationMs before whisper boost and avoids clipping normal speech', () => {
   const sr = 16000;
-  // 100ms of quiet noise (RMS ~0.008 < SPEECH_RMS_THRESHOLD 0.014, peak = 0.008 < 0.15)
+  // 100ms of quiet audio (RMS 0.008 < SPEECH_RMS_THRESHOLD 0.014, >= WHISPER_ACTIVITY_RMS_FLOOR 0.0015)
   const quiet = new Float32Array(sr * 0.1).fill(0.008);
   const quietRes = resampleFloat32([quiet], sr, sr, true);
   assert.equal(quietRes.speechDurationMs, 0);
   assert.ok(Math.abs(quietRes.peak - 0.008 * WHISPER_MAX_GAIN) < 1e-5);
 
-  // Normal speech (peak = 0.4 >= 0.15) should not be boosted or distorted
-  const normal = new Float32Array(sr * 0.1).fill(0.4);
+  // Normal speech (RMS 0.2 >= WHISPER_TARGET_RMS 0.10) should not be boosted or distorted
+  const normal = new Float32Array(sr * 0.1).fill(0.2);
   const normalRes = resampleFloat32([normal], sr, sr, true);
   assert.equal(normalRes.speechDurationMs, 100);
-  assert.ok(Math.abs(normalRes.peak - 0.4) < 1e-6);
-  assert.ok(Math.abs(normalRes.pcm[0] - 0.4) < 1e-6);
+  assert.ok(Math.abs(normalRes.peak - 0.2) < 1e-6);
+  assert.ok(Math.abs(normalRes.pcm[0] - 0.2) < 1e-6);
 
-  // Quiet speech (peak = 0.10, RMS = 0.10 >= 0.014) gets gentle linear boost to 0.50
-  const softSpeech = new Float32Array(sr * 0.1).fill(0.1);
+  // Quiet speech (RMS 0.02 >= 0.014) gets 5x RMS boost to 0.10 (-20 dBFS)
+  const softSpeech = new Float32Array(sr * 0.1).fill(0.02);
   const softRes = resampleFloat32([softSpeech], sr, sr, true);
   assert.equal(softRes.speechDurationMs, 100);
-  assert.ok(Math.abs(softRes.peak - 0.5) < 1e-5);
-  assert.ok(Math.abs(softRes.pcm[0] - 0.5) < 1e-5);
+  assert.ok(Math.abs(softRes.peak - 0.1) < 1e-5);
+  assert.ok(Math.abs(softRes.pcm[0] - 0.1) < 1e-5);
+
+  // Pure silence / sub-floor hum (< 0.0015) is not boosted
+  const silence = new Float32Array(sr * 0.1).fill(0.0005);
+  const silenceRes = resampleFloat32([silence], sr, sr, true);
+  assert.equal(silenceRes.speechDurationMs, 0);
+  assert.ok(Math.abs(silenceRes.peak - 0.0005) < 1e-6);
 });

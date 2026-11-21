@@ -563,7 +563,7 @@ export function registerIpcHandlers(ctx: AppRuntimeContext): void {
       sessionId: payload.sessionId,
       wavBuffer,
       opusBuffer,
-      speechDurationMs: payload.speechDurationMs || stats?.durationMs || 0,
+      speechDurationMs: payload.speechDurationMs ?? stats?.durationMs ?? 0,
       totalDurationMs: payload.durationMs || stats?.durationMs || 0,
       isSilent,
       error: payload.error,

@@ -73,6 +73,11 @@ const SHORTCUT_ROWS: Array<{
     label: 'Copy Last Dictation',
     desc: 'Copy your most recent transcript to clipboard.',
   },
+  {
+    field: 'fixInputHotkey',
+    label: 'Fix My Input Box',
+    desc: 'Fix keyboard typos in the focused input box in place.',
+  },
 ];
 
 const SOUND_SLOT_LABELS: Record<SoundSlot, string> = {

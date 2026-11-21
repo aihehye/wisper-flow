@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 // @ts-ignore Node --experimental-strip-types requires explicit .ts extension
-import { extractCorrectionCandidates, scheduleCorrectionWatch } from '../src/main/pipeline/correctionWatcher.ts';
+import { computePhoneticSimilarity, extractCorrectionCandidates, isSingleCharPrefixAccident, isUiPlaceholderNoise, recordCorrectionSighting, resetCorrectionSightings, scheduleCorrectionWatch, shouldAutoPromoteCorrection } from '../src/main/pipeline/correctionWatcher.ts';
 
 describe('extractCorrectionCandidates', () => {
   it('detects a single-word case or spelling correction', () => {
@@ -111,6 +111,35 @@ describe('extractCorrectionCandidates', () => {
       ),
       []
     );
+  });
+  it('rejects UI placeholder noise and single-char prefix accidents', () => {
+    assert.equal(isUiPlaceholderNoise('Message input'), true);
+    assert.equal(isUiPlaceholderNoise('Type a message...'), true);
+    assert.equal(isUiPlaceholderNoise('Ask anything'), true);
+    assert.equal(isSingleCharPrefixAccident('For', 'tFor'), true);
+    assert.equal(isSingleCharPrefixAccident('whisper', 'Wisper'), false);
+
+    assert.deepEqual(extractCorrectionCandidates('Hello world', 'Message input'), []);
+    assert.deepEqual(extractCorrectionCandidates('Hello world', 'Type a message'), []);
+    assert.deepEqual(extractCorrectionCandidates('Hello world', 'Ask anything'), []);
+    assert.deepEqual(
+      extractCorrectionCandidates('For the next release', 'tFor the next release'),
+      []
+    );
+  });
+
+  it('auto-promotes corrections when seen >= 2 times OR high phonetic similarity >= 0.65', () => {
+    resetCorrectionSightings();
+    // High phonetic similarity -> auto-promote on first sighting
+    assert.ok(computePhoneticSimilarity('Mantheja', 'Maniteja') >= 0.65);
+    assert.equal(shouldAutoPromoteCorrection('Mantheja', 'Maniteja', 1), true);
+
+    // Low phonetic similarity -> wait until seen >= 2 times
+    assert.ok(computePhoneticSimilarity('Twitter', 'X') < 0.65);
+    const seen1 = recordCorrectionSighting('Twitter', 'X');
+    assert.equal(shouldAutoPromoteCorrection('Twitter', 'X', seen1), false);
+    const seen2 = recordCorrectionSighting('Twitter', 'X');
+    assert.equal(shouldAutoPromoteCorrection('Twitter', 'X', seen2), true);
   });
 });
 

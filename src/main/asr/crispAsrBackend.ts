@@ -13,10 +13,13 @@ import {
   parseDeviceListOutput,
 } from './llamaServerBackend';
 import {
+  applyHighPassWav,
+  applySpeechEqWav,
   compactInternalSilenceWav,
   DEFAULT_MAX_CHUNK_SEC,
   DEFAULT_MIN_CHUNK_SEC,
   getSilenceRmsThreshold,
+  hasActiveSpeechWav,
   splitWavIntoChunks,
   trimSilenceWav,
 } from './wavUtils';
@@ -307,10 +310,19 @@ export class CrispAsrBackend implements AsrBackend {
     }
 
     const t0 = performance.now();
+    const highPassed = applyHighPassWav(req.wavBuffer);
     const rmsThreshold = getSilenceRmsThreshold(req.micProfile ?? 'quiet');
-    const trimmed = trimSilenceWav(req.wavBuffer, 80, 110, rmsThreshold);
+    if (!hasActiveSpeechWav(highPassed, rmsThreshold)) {
+      return {
+        rawText: '',
+        asrLatencyMs: Math.round(performance.now() - t0),
+      };
+    }
+
+    const trimmed = trimSilenceWav(highPassed, 80, 110, rmsThreshold);
     const compacted = compactInternalSilenceWav(trimmed, { rmsThreshold });
-    const chunks = splitWavIntoChunks(compacted, DEFAULT_MAX_CHUNK_SEC, DEFAULT_MIN_CHUNK_SEC);
+    const preprocessed = applySpeechEqWav(compacted, { includeHighPass: false });
+    const chunks = splitWavIntoChunks(preprocessed, DEFAULT_MAX_CHUNK_SEC, DEFAULT_MIN_CHUNK_SEC);
 
     const texts: string[] = [];
     let detectedLanguage: string | undefined;

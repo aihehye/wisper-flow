@@ -25,32 +25,294 @@ export const NOISY_SILENCE_RMS_THRESHOLD = 120; // ~ -48.7 dBFS over 20ms frames
 export const DEFAULT_MAX_CHUNK_SEC = 90;
 export const DEFAULT_MIN_CHUNK_SEC = 45;
 
+export const HIGH_PASS_CUTOFF_HZ = 90;
+export const LOW_SHELF_FREQ_HZ = 240;
+export const LOW_SHELF_GAIN_DB = -4;
+export const HIGH_SHELF_FREQ_HZ = 1400;
+export const HIGH_SHELF_GAIN_DB = 8;
+export const ADAPTIVE_NOISE_FLOOR_MULTIPLIER = 2.2;
+export const ADAPTIVE_RMS_THRESHOLD_CAP = 1800;
+export const MIN_ACTIVE_SPEECH_MS = 140; // Require >= 7 x 20ms active frames
+
+const WAV_SOFT_LIMIT_THRESHOLD = 0.75;
+const WAV_SOFT_LIMIT_CEILING = 0.95;
+
+interface BiquadCoeffs {
+  b0: number;
+  b1: number;
+  b2: number;
+  a1: number;
+  a2: number;
+}
+
+function makeHighPassBiquad(
+  sampleRate: number,
+  cutoffHz = HIGH_PASS_CUTOFF_HZ,
+  q = Math.SQRT1_2
+): BiquadCoeffs | null {
+  if (sampleRate <= 0 || cutoffHz <= 0 || cutoffHz >= sampleRate * 0.45) {
+    return null;
+  }
+  const w0 = (2 * Math.PI * cutoffHz) / sampleRate;
+  const cosW0 = Math.cos(w0);
+  const sinW0 = Math.sin(w0);
+  const alpha = sinW0 / (2 * q);
+
+  const a0 = 1 + alpha;
+  return {
+    b0: (1 + cosW0) / 2 / a0,
+    b1: -(1 + cosW0) / a0,
+    b2: (1 + cosW0) / 2 / a0,
+    a1: (-2 * cosW0) / a0,
+    a2: (1 - alpha) / a0,
+  };
+}
+
+function makeLowShelfBiquad(
+  sampleRate: number,
+  freqHz = LOW_SHELF_FREQ_HZ,
+  gainDb = LOW_SHELF_GAIN_DB,
+  slope = 1
+): BiquadCoeffs | null {
+  if (sampleRate <= 0 || freqHz <= 0 || freqHz >= sampleRate * 0.45) {
+    return null;
+  }
+  const a = Math.pow(10, gainDb / 40);
+  const w0 = (2 * Math.PI * freqHz) / sampleRate;
+  const cosW0 = Math.cos(w0);
+  const sinW0 = Math.sin(w0);
+  const alpha = (sinW0 / 2) * Math.sqrt((a + 1 / a) * (1 / slope - 1) + 2);
+  const twoSqrtAAlpha = 2 * Math.sqrt(a) * alpha;
+
+  const a0 = a + 1 + (a - 1) * cosW0 + twoSqrtAAlpha;
+  return {
+    b0: (a * (a + 1 - (a - 1) * cosW0 + twoSqrtAAlpha)) / a0,
+    b1: (2 * a * (a - 1 - (a + 1) * cosW0)) / a0,
+    b2: (a * (a + 1 - (a - 1) * cosW0 - twoSqrtAAlpha)) / a0,
+    a1: (-2 * (a - 1 + (a + 1) * cosW0)) / a0,
+    a2: (a + 1 + (a - 1) * cosW0 - twoSqrtAAlpha) / a0,
+  };
+}
+
+function makeHighShelfBiquad(
+  sampleRate: number,
+  freqHz = HIGH_SHELF_FREQ_HZ,
+  gainDb = HIGH_SHELF_GAIN_DB,
+  slope = 1
+): BiquadCoeffs | null {
+  if (sampleRate <= 0 || freqHz <= 0 || freqHz >= sampleRate * 0.45) {
+    return null;
+  }
+  const a = Math.pow(10, gainDb / 40);
+  const w0 = (2 * Math.PI * freqHz) / sampleRate;
+  const cosW0 = Math.cos(w0);
+  const sinW0 = Math.sin(w0);
+  const alpha = (sinW0 / 2) * Math.sqrt((a + 1 / a) * (1 / slope - 1) + 2);
+  const twoSqrtAAlpha = 2 * Math.sqrt(a) * alpha;
+
+  const a0 = a + 1 - (a - 1) * cosW0 + twoSqrtAAlpha;
+  return {
+    b0: (a * (a + 1 + (a - 1) * cosW0 + twoSqrtAAlpha)) / a0,
+    b1: (-2 * a * (a - 1 + (a + 1) * cosW0)) / a0,
+    b2: (a * (a + 1 + (a - 1) * cosW0 - twoSqrtAAlpha)) / a0,
+    a1: (2 * (a - 1 - (a + 1) * cosW0)) / a0,
+    a2: (a + 1 - (a - 1) * cosW0 - twoSqrtAAlpha) / a0,
+  };
+}
+
+function processBiquadInPlace(buf: Float64Array, coeffs: BiquadCoeffs): void {
+  const { b0, b1, b2, a1, a2 } = coeffs;
+  let z1 = 0;
+  let z2 = 0;
+  for (let i = 0; i < buf.length; i++) {
+    const x = buf[i];
+    const y = b0 * x + z1;
+    z1 = b1 * x - a1 * y + z2;
+    z2 = b2 * x - a2 * y;
+    buf[i] = y;
+  }
+}
+
+function softProtectNormalized(x: number): number {
+  if (!Number.isFinite(x)) return 0;
+  const abs = Math.abs(x);
+  if (abs <= WAV_SOFT_LIMIT_THRESHOLD) return x;
+  const headroom = WAV_SOFT_LIMIT_CEILING - WAV_SOFT_LIMIT_THRESHOLD;
+  return (
+    Math.sign(x) *
+    (WAV_SOFT_LIMIT_THRESHOLD + headroom * Math.tanh((abs - WAV_SOFT_LIMIT_THRESHOLD) / headroom))
+  );
+}
+
+function float64ToInt16Protected(buf: Float64Array): Int16Array {
+  const out = new Int16Array(buf.length);
+  for (let i = 0; i < buf.length; i++) {
+    const limited = softProtectNormalized(buf[i]);
+    const scaled = limited < 0 ? Math.round(limited * 32768) : Math.round(limited * 32767);
+    out[i] = Math.max(-32768, Math.min(32767, scaled));
+  }
+  return out;
+}
+
+function applyHighPassFloat64RawUnits(
+  samples: Int16Array,
+  sampleRate: number,
+  cutoffHz = HIGH_PASS_CUTOFF_HZ
+): Float64Array {
+  const buf = new Float64Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    buf[i] = samples[i];
+  }
+  const hp = makeHighPassBiquad(sampleRate, cutoffHz);
+  if (hp) {
+    processBiquadInPlace(buf, hp);
+  }
+  return buf;
+}
+
+/**
+ * Applies a 2nd-order Butterworth high-pass filter (default 90 Hz) with soft peak protection.
+ */
+export function applyHighPassFilter(
+  samples: Int16Array,
+  sampleRate: number,
+  cutoffHz = HIGH_PASS_CUTOFF_HZ
+): Int16Array {
+  if (samples.length === 0 || sampleRate <= 0) {
+    return new Int16Array(samples);
+  }
+  const buf = new Float64Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    buf[i] = samples[i] / 32768;
+  }
+  const hp = makeHighPassBiquad(sampleRate, cutoffHz);
+  if (hp) {
+    processBiquadInPlace(buf, hp);
+  }
+  return float64ToInt16Protected(buf);
+}
+
+/**
+ * Applies a 90 Hz high-pass filter to a WAV buffer to remove sub-bass rumble and DC offset.
+ */
+export function applyHighPassWav(wavBuf: Buffer, cutoffHz = HIGH_PASS_CUTOFF_HZ): Buffer {
+  const { sampleRate, samples } = decodeMonoWavSamples(wavBuf);
+  if (samples.length === 0 || sampleRate <= 0) return wavBuf;
+  return encodePcm16MonoWav(applyHighPassFilter(samples, sampleRate, cutoffHz), sampleRate);
+}
+
+/**
+ * Applies speech Tilt EQ (-4 dB low shelf <240 Hz, +8 dB high shelf >1.4 kHz),
+ * optionally preceded by a 90 Hz high-pass filter, with soft tanh peak protection.
+ */
+export function applySpeechEqSamples(
+  samples: Int16Array,
+  sampleRate: number,
+  options?: { includeHighPass?: boolean }
+): Int16Array {
+  if (samples.length === 0 || sampleRate <= 0) {
+    return new Int16Array(samples);
+  }
+  const buf = new Float64Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    buf[i] = samples[i] / 32768;
+  }
+  if (options?.includeHighPass !== false) {
+    const hp = makeHighPassBiquad(sampleRate, HIGH_PASS_CUTOFF_HZ);
+    if (hp) processBiquadInPlace(buf, hp);
+  }
+  const lowShelf = makeLowShelfBiquad(sampleRate, LOW_SHELF_FREQ_HZ, LOW_SHELF_GAIN_DB);
+  if (lowShelf) processBiquadInPlace(buf, lowShelf);
+
+  const highShelf = makeHighShelfBiquad(sampleRate, HIGH_SHELF_FREQ_HZ, HIGH_SHELF_GAIN_DB);
+  if (highShelf) processBiquadInPlace(buf, highShelf);
+
+  return float64ToInt16Protected(buf);
+}
+
+/**
+ * Applies speech Tilt EQ (-4 dB low shelf @ 240 Hz, +8 dB high shelf @ 1.4 kHz),
+ * optionally preceded by 90 Hz HPF (default true).
+ */
+export function applySpeechEqWav(
+  wavBuf: Buffer,
+  options?: { includeHighPass?: boolean }
+): Buffer {
+  const { sampleRate, samples } = decodeMonoWavSamples(wavBuf);
+  if (samples.length === 0 || sampleRate <= 0) return wavBuf;
+  return encodePcm16MonoWav(applySpeechEqSamples(samples, sampleRate, options), sampleRate);
+}
+
+/**
+ * Full deterministic speech preprocessing: 90 Hz HPF + Tilt EQ (-4 dB <240 Hz, +8 dB >1.4 kHz).
+ */
+export function preprocessSpeechWav(wavBuf: Buffer): Buffer {
+  return applySpeechEqWav(wavBuf, { includeHighPass: true });
+}
+
 export function getSilenceRmsThreshold(micProfile?: MicProfile): number {
   return micProfile === 'quiet' ? QUIET_SILENCE_RMS_THRESHOLD : NOISY_SILENCE_RMS_THRESHOLD;
 }
 
-function computeActiveFrameFlags(
+function analyzeSpeechFrames(
   samples: Int16Array,
-  frameLen: number,
-  rmsThreshold: number
-): boolean[] {
+  sampleRate: number,
+  baseThreshold: number
+): { effectiveThreshold: number; activeFlags: boolean[] } {
   const numSamples = samples.length;
+  if (numSamples === 0 || sampleRate <= 0) {
+    return { effectiveThreshold: baseThreshold, activeFlags: [] };
+  }
+
+  const hpSamples = applyHighPassFloat64RawUnits(samples, sampleRate, HIGH_PASS_CUTOFF_HZ);
+  const frameLen = Math.max(1, Math.floor(sampleRate * 0.02)); // 20 ms frames
   const numFrames = Math.ceil(numSamples / frameLen);
-  const flags = new Array<boolean>(numFrames);
+  const frameRms = new Array<number>(numFrames);
+  const floorCandidates: number[] = [];
+  const minFloorFrameLen = numSamples >= frameLen ? Math.max(1, Math.floor(frameLen / 2)) : 1;
 
   for (let frameIdx = 0; frameIdx < numFrames; frameIdx++) {
     const start = frameIdx * frameLen;
     const end = Math.min(numSamples, start + frameLen);
+    const len = end - start;
     let sumSq = 0;
     for (let i = start; i < end; i++) {
-      const s = samples[i];
+      const s = hpSamples[i];
       sumSq += s * s;
     }
-    const rms = Math.sqrt(sumSq / Math.max(1, end - start));
-    flags[frameIdx] = rms >= rmsThreshold;
+    const rms = Math.sqrt(sumSq / Math.max(1, len));
+    frameRms[frameIdx] = rms;
+    if (len >= minFloorFrameLen) {
+      floorCandidates.push(rms);
+    }
   }
 
-  return flags;
+  const sortedFloor = (floorCandidates.length > 0 ? floorCandidates : frameRms).slice().sort((a, b) => a - b);
+  const p15Idx = Math.min(sortedFloor.length - 1, Math.floor((sortedFloor.length - 1) * 0.15));
+  const noiseFloor = sortedFloor[p15Idx] ?? 0;
+  const effectiveThreshold = Math.max(
+    baseThreshold,
+    Math.min(ADAPTIVE_RMS_THRESHOLD_CAP, Math.round(noiseFloor * ADAPTIVE_NOISE_FLOOR_MULTIPLIER))
+  );
+
+  const activeFlags = new Array<boolean>(numFrames);
+  for (let i = 0; i < numFrames; i++) {
+    activeFlags[i] = frameRms[i] >= effectiveThreshold;
+  }
+
+  return { effectiveThreshold, activeFlags };
+}
+
+/**
+ * Computes an adaptive 20ms RMS threshold from the 15th-percentile noise floor
+ * after 90 Hz high-pass filtering: `max(baseThreshold, min(1800, round(noiseFloor * 2.2)))`.
+ */
+export function computeAdaptiveRmsThreshold(
+  samples: Int16Array,
+  sampleRate: number,
+  baseThreshold: number
+): number {
+  return analyzeSpeechFrames(samples, sampleRate, baseThreshold).effectiveThreshold;
 }
 
 /**
@@ -241,8 +503,32 @@ export function computeWavStats(wavBuf: Buffer): WavStats {
 }
 
 /**
- * Trims leading and trailing silence using 20ms frame-RMS gating (immune to single-sample clicks)
- * while preserving gentle speech onset/offset padding.
+ * Returns true if at least 140 ms (7 x 20ms frames) meet or exceed the adaptive
+ * noise-floor-gated RMS threshold after 90 Hz high-pass filtering.
+ * Used to avoid sending silence or brief clicks (and dictionary hints) to ASR backends.
+ */
+export function hasActiveSpeechWav(
+  wavBuf: Buffer,
+  rmsThreshold = NOISY_SILENCE_RMS_THRESHOLD
+): boolean {
+  const { sampleRate, samples } = decodeMonoWavSamples(wavBuf);
+  if (samples.length === 0 || sampleRate <= 0) return false;
+
+  const { activeFlags } = analyzeSpeechFrames(samples, sampleRate, rmsThreshold);
+  const minActiveFrames = Math.ceil(MIN_ACTIVE_SPEECH_MS / 20);
+  let activeFrames = 0;
+  for (let i = 0; i < activeFlags.length; i++) {
+    if (activeFlags[i]) {
+      activeFrames += 1;
+      if (activeFrames >= minActiveFrames) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Trims leading and trailing silence using adaptive 20ms frame-RMS gating (immune to clicks
+ * and sub-90 Hz rumble) while preserving gentle speech onset/offset padding.
  */
 export function trimSilenceWav(
   wavBuf: Buffer,
@@ -255,7 +541,7 @@ export function trimSilenceWav(
   if (numSamples === 0 || sampleRate <= 0) return wavBuf;
 
   const frameLen = Math.max(1, Math.floor(sampleRate * 0.02)); // 20 ms frames
-  const activeFlags = computeActiveFrameFlags(samples, frameLen, rmsThreshold);
+  const { activeFlags } = analyzeSpeechFrames(samples, sampleRate, rmsThreshold);
   const numFrames = activeFlags.length;
 
   let firstActiveFrame = 0;
@@ -305,7 +591,7 @@ export function compactInternalSilenceWav(
   }
 
   const frameLen = Math.max(1, Math.floor(sampleRate * 0.02)); // 20 ms frames
-  const activeFlags = computeActiveFrameFlags(samples, frameLen, rmsThreshold);
+  const { activeFlags } = analyzeSpeechFrames(samples, sampleRate, rmsThreshold);
   const numFrames = activeFlags.length;
 
   let firstActiveFrame = 0;

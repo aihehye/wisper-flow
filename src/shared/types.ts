@@ -41,6 +41,7 @@ export interface ShortcutsConfig {
   cancel: string;
   pasteLast: string;
   copyLast: string;
+  fixInputHotkey: string;
 }
 
 export interface RumbleOptions {

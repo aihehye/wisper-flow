@@ -1,7 +1,8 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { app } from 'electron';
+import { promisify } from 'node:util';
+import { app, clipboard, globalShortcut } from 'electron';
 import type { OmarchyEnvironment, ShortcutsConfig } from '../../shared/types';
 import { setFocusedTextReader } from '../pipeline/correctionWatcher';
 import { generateOmarchySnippets } from './omarchy';
@@ -11,7 +12,10 @@ import type {
   PlatformBridge,
   PlatformEventHandlers,
   PlatformPasteOptions,
+  SelectAllCopyResult,
 } from './types';
+
+const execFileAsync = promisify(execFile);
 
 interface HelperMessage {
   event?: string;
@@ -47,6 +51,50 @@ export class WindowsBridge implements PlatformBridge {
   private pending = new Map<number, PendingRequest>();
   private stopping = false;
   private restartedOnce = false;
+  private registeredFixInputAccel: string | null = null;
+
+  private toElectronAccelerator(raw: string): string | null {
+    const parts = raw
+      .split('+')
+      .map((p) => p.trim())
+      .filter(Boolean);
+    if (parts.length === 0) return null;
+    const mapped: string[] = [];
+    for (const part of parts) {
+      const lower = part.toLowerCase();
+      if (lower === 'ctrl' || lower === 'control') mapped.push('CommandOrControl');
+      else if (lower === 'win' || lower === 'super' || lower === 'meta') mapped.push('Super');
+      else if (lower === 'alt') mapped.push('Alt');
+      else if (lower === 'shift') mapped.push('Shift');
+      else if (lower === 'esc' || lower === 'escape') mapped.push('Escape');
+      else if (lower === 'space') mapped.push('Space');
+      else mapped.push(part.length === 1 ? part.toUpperCase() : part);
+    }
+    return mapped.join('+');
+  }
+
+  private syncFixInputShortcut(rawShortcut?: string): void {
+    if (this.registeredFixInputAccel) {
+      try {
+        globalShortcut.unregister(this.registeredFixInputAccel);
+      } catch {
+        // Ignore cleanup errors
+      }
+      this.registeredFixInputAccel = null;
+    }
+    const accel = rawShortcut ? this.toElectronAccelerator(rawShortcut) : null;
+    if (!accel) return;
+    try {
+      const ok = globalShortcut.register(accel, () => {
+        this.handlers?.onFixInputPressed?.();
+      });
+      if (ok) {
+        this.registeredFixInputAccel = accel;
+      }
+    } catch {
+      // Non-fatal if OS/another app holds the shortcut
+    }
+  }
 
   private resolveHelperPath(): string {
     const appPath = typeof app?.getAppPath === 'function' ? app.getAppPath() : process.cwd();
@@ -281,6 +329,7 @@ export class WindowsBridge implements PlatformBridge {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    this.syncFixInputShortcut(undefined);
     setFocusedTextReader(null);
     const child = this.proc;
     if (!child) {
@@ -315,6 +364,7 @@ export class WindowsBridge implements PlatformBridge {
 
   async updateShortcuts(shortcuts: ShortcutsConfig): Promise<void> {
     this.currentShortcuts = { ...shortcuts };
+    this.syncFixInputShortcut(shortcuts.fixInputHotkey);
     if (!this.proc) return;
     await this.sendCommand('set-shortcuts', {
       pushToTalk: shortcuts.pushToTalk,
@@ -362,6 +412,53 @@ export class WindowsBridge implements PlatformBridge {
       };
     } catch {
       return { ok: false, reason: 'error' };
+    }
+  }
+
+  async selectAllAndCopy(): Promise<SelectAllCopyResult> {
+    const previousClipboard = clipboard.readText();
+    const sentinel = `__WISPER_FIX_SENTINEL_${Date.now()}__`;
+    clipboard.writeText(sentinel);
+
+    // Release Alt/Win/Shift if still held from the hotkey, then send Ctrl+A and Ctrl+C
+    const psScript = [
+      'Add-Type -TypeDefinition @"',
+      'using System; using System.Runtime.InteropServices;',
+      'public static class WfKeys {',
+      '  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);',
+      '  public static void Up(byte vk) { keybd_event(vk, 0, 2, UIntPtr.Zero); }',
+      '  public static void Down(byte vk) { keybd_event(vk, 0, 0, UIntPtr.Zero); }',
+      '}',
+      '"@',
+      '[WfKeys]::Up(0x12); [WfKeys]::Up(0xA4); [WfKeys]::Up(0xA5); [WfKeys]::Up(0x10); [WfKeys]::Up(0x5B)',
+      'Start-Sleep -Milliseconds 35',
+      '[WfKeys]::Down(0x11); [WfKeys]::Down(0x41); Start-Sleep -Milliseconds 15; [WfKeys]::Up(0x41); [WfKeys]::Up(0x11)',
+      'Start-Sleep -Milliseconds 35',
+      '[WfKeys]::Down(0x11); [WfKeys]::Down(0x43); Start-Sleep -Milliseconds 15; [WfKeys]::Up(0x43); [WfKeys]::Up(0x11)',
+    ].join('\n');
+
+    try {
+      await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', psScript], {
+        timeout: 3000,
+        windowsHide: true,
+      });
+      // Give the target app a brief moment to populate the clipboard
+      for (let i = 0; i < 6; i++) {
+        await new Promise((r) => setTimeout(r, 25));
+        const current = clipboard.readText();
+        if (current !== sentinel) {
+          return { ok: true, text: current, previousClipboard };
+        }
+      }
+      clipboard.writeText(previousClipboard);
+      return { ok: false, previousClipboard, error: 'No text copied from active input box' };
+    } catch (err) {
+      clipboard.writeText(previousClipboard);
+      return {
+        ok: false,
+        previousClipboard,
+        error: err instanceof Error ? err.message : String(err),
+      };
     }
   }
 

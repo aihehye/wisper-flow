@@ -29,9 +29,15 @@ const {
   decodeMonoWavSamples,
   computeWavStats,
   trimSilenceWav,
+  hasActiveSpeechWav,
   compactInternalSilenceWav,
   splitWavIntoChunks,
   getSilenceRmsThreshold,
+  applyHighPassFilter,
+  applyHighPassWav,
+  applySpeechEqWav,
+  preprocessSpeechWav,
+  computeAdaptiveRmsThreshold,
   QUIET_SILENCE_RMS_THRESHOLD,
   NOISY_SILENCE_RMS_THRESHOLD,
   DEFAULT_MAX_CHUNK_SEC,
@@ -322,13 +328,18 @@ test('compactInternalSilenceWav compacts pauses > 800ms to 350ms with splice fad
     rmsThreshold: QUIET_SILENCE_RMS_THRESHOLD,
   });
   const decoded = decodeMonoWavSamples(compactedWav);
-  const expectedSamples = s1.length + s2.length + Math.round(sr * 0.35);
-  assert.equal(decoded.samples.length, expectedSamples);
+  const targetPauseSamples = Math.round(sr * 0.35);
+  const expectedMinSamples = s1.length + s2.length + targetPauseSamples;
+  // 90 Hz HPF step response from abrupt s1 cutoff may retain at most 1 boundary frame (320 samples)
+  assert.ok(
+    decoded.samples.length >= expectedMinSamples && decoded.samples.length <= expectedMinSamples + 320,
+    `Expected compacted length within [${expectedMinSamples}, ${expectedMinSamples + 320}], got ${decoded.samples.length}`
+  );
 
-  // Verify splice boundary fades smoothly through 0 (175ms into the retained pause)
-  const spliceIdx = s1.length + Math.floor(Math.round(sr * 0.35) / 2);
-  assert.equal(decoded.samples[spliceIdx - 1], 0);
-  assert.equal(decoded.samples[spliceIdx], 0);
+  // Verify splice boundary fades smoothly through 0
+  const retainedPrefix = decoded.samples.length - s2.length - Math.ceil(targetPauseSamples / 2);
+  assert.equal(decoded.samples[retainedPrefix - 1], 0);
+  assert.equal(decoded.samples[retainedPrefix], 0);
   // Before fade-out region (earlier in lead pause), floor value 20 is intact
   assert.equal(decoded.samples[s1.length + 10], 20);
 });
@@ -359,4 +370,83 @@ test('splitWavIntoChunks defaults to 90s max / 45s min and splits 110s WAV clean
   }
   const firstDurSec = decodeMonoWavSamples(chunks[0]).samples.length / sr;
   assert.ok(firstDurSec >= 59.7 && firstDurSec <= 60.3, `Expected split near 60s, got ${firstDurSec}s`);
+});
+
+test('hasActiveSpeechWav requires >= 140ms active frames and ignores short clicks', () => {
+  const sr = 16000;
+  const silent = encodePcm16MonoWav(new Int16Array(sr), sr);
+  assert.equal(hasActiveSpeechWav(silent, QUIET_SILENCE_RMS_THRESHOLD), false);
+
+  // Brief 40ms click/burst (< 140ms) should return false
+  const clickBurst = new Int16Array(sr);
+  const burst = makeSineSamples(sr, 0.04, 440, 2000);
+  clickBurst.set(burst, Math.floor(sr * 0.2));
+  assert.equal(hasActiveSpeechWav(encodePcm16MonoWav(clickBurst, sr), QUIET_SILENCE_RMS_THRESHOLD), false);
+
+  // Real speech (>= 140ms) with quiet pre-roll silence returns true
+  const speech = new Int16Array(sr);
+  const tone = makeSineSamples(sr, 0.5, 440, 200);
+  speech.set(tone, Math.floor(sr * 0.25));
+  assert.equal(hasActiveSpeechWav(encodePcm16MonoWav(speech, sr), QUIET_SILENCE_RMS_THRESHOLD), true);
+});
+
+test('computeAdaptiveRmsThreshold adapts to elevated noise floor while ignoring sub-90Hz rumble', () => {
+  const sr = 16000;
+
+  // Sub-90 Hz rumble (40 Hz) should be attenuated by 90 Hz HPF and not inflate threshold or trigger VAD
+  const rumble = makeSineSamples(sr, 1.0, 40, 2000);
+  const rumbleThreshold = computeAdaptiveRmsThreshold(rumble, sr, QUIET_SILENCE_RMS_THRESHOLD);
+  assert.ok(rumbleThreshold < 600, `Expected low threshold after 90Hz HPF, got ${rumbleThreshold}`);
+  assert.equal(hasActiveSpeechWav(encodePcm16MonoWav(rumble, sr), QUIET_SILENCE_RMS_THRESHOLD), false);
+
+  // Elevated 500 Hz noise floor (~400 amplitude -> ~283 RMS) raises threshold to ~2.2x noiseFloor
+  const noisyFloor = makeSineSamples(sr, 1.0, 500, 400);
+  const adaptive = computeAdaptiveRmsThreshold(noisyFloor, sr, QUIET_SILENCE_RMS_THRESHOLD);
+  assert.ok(adaptive >= 550 && adaptive <= 700, `Expected ~620 adaptive threshold, got ${adaptive}`);
+  // Steady noise floor alone does not falsely trigger active speech
+  assert.equal(hasActiveSpeechWav(encodePcm16MonoWav(noisyFloor, sr), QUIET_SILENCE_RMS_THRESHOLD), false);
+
+  // Adding speech at 1500 amplitude (~1060 RMS > ~620 adaptive threshold) triggers active speech
+  const speech = makeSineSamples(sr, 0.4, 500, 1500);
+  const noisyWithSpeech = new Int16Array(noisyFloor);
+  noisyWithSpeech.set(speech, Math.floor(sr * 0.3));
+  assert.equal(hasActiveSpeechWav(encodePcm16MonoWav(noisyWithSpeech, sr), QUIET_SILENCE_RMS_THRESHOLD), true);
+
+  // High noise floor is capped at 1800
+  const veryNoisy = makeSineSamples(sr, 0.5, 500, 5000);
+  assert.equal(computeAdaptiveRmsThreshold(veryNoisy, sr, QUIET_SILENCE_RMS_THRESHOLD), 1800);
+});
+
+test('applyHighPassFilter and preprocessSpeechWav attenuate bass rumble, boost consonants, and prevent int16 wrap', () => {
+  const sr = 16000;
+
+  // 40 Hz rumble is strongly attenuated by 90 Hz HPF
+  const rumble = makeSineSamples(sr, 0.5, 40, 8000);
+  const hpRumble = applyHighPassFilter(rumble, sr, 90);
+  const rumbleStats = computeWavStats(encodePcm16MonoWav(hpRumble.subarray(Math.floor(sr * 0.1)), sr));
+  assert.ok(rumbleStats.rms < 1500, `Expected 40Hz rumble attenuated, got rms=${rumbleStats.rms}`);
+
+  // Compare steady-state RMS of 150 Hz (low shelf -4dB + HPF) vs 3000 Hz (high shelf +8dB)
+  const lowTone = encodePcm16MonoWav(makeSineSamples(sr, 0.5, 150, 4000), sr);
+  const highTone = encodePcm16MonoWav(makeSineSamples(sr, 0.5, 3000, 4000), sr);
+  const lowOut = decodeMonoWavSamples(preprocessSpeechWav(lowTone)).samples;
+  const highOut = decodeMonoWavSamples(preprocessSpeechWav(highTone)).samples;
+
+  const steadyStart = Math.floor(sr * 0.15);
+  const lowOutStats = computeWavStats(encodePcm16MonoWav(lowOut.subarray(steadyStart), sr));
+  const highOutStats = computeWavStats(encodePcm16MonoWav(highOut.subarray(steadyStart), sr));
+
+  // 4000 sine RMS is ~2828; 150 Hz should be attenuated (~-4 dB -> < 2000), 3000 Hz boosted (~+8 dB -> > 5500)
+  assert.ok(lowOutStats.rms < 2000, `Expected 150 Hz attenuation, got rms=${lowOutStats.rms}`);
+  assert.ok(highOutStats.rms > 5500, `Expected 3000 Hz boost, got rms=${highOutStats.rms}`);
+
+  // High-amplitude 3000 Hz signal must soft-saturate without wrapping negative/positive
+  const loudHigh = encodePcm16MonoWav(makeSineSamples(sr, 0.2, 3000, 28000), sr);
+  const loudEq = decodeMonoWavSamples(applySpeechEqWav(loudHigh)).samples;
+  const loudStats = computeWavStats(encodePcm16MonoWav(loudEq, sr));
+  assert.ok(loudStats.peak <= 31200, `Expected soft ceiling <= ~0.95 FS, got peak=${loudStats.peak}`);
+
+  // applyHighPassWav preserves sampleRate and header cleanly
+  const hpWav = applyHighPassWav(lowTone);
+  assert.equal(decodeMonoWavSamples(hpWav).sampleRate, sr);
 });
