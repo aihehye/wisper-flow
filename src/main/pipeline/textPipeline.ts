@@ -1,3 +1,5 @@
+// @ts-ignore Node --experimental-strip-types requires explicit .ts extension
+import { COMMON_ENGLISH_WORDS } from './typoFixer.ts';
 import type {
   CleanupOptions,
   DictionaryEntry,
@@ -180,52 +182,73 @@ function applyDeterministicCleanup(
   return out;
 }
 
-const COMMON_SINGLE_WORDS = new Set([
-  'about', 'above', 'after', 'again', 'against', 'almost', 'alone', 'along', 'already', 'always',
-  'among', 'another', 'answer', 'around', 'asked', 'asking', 'based', 'became', 'because', 'become',
-  'before', 'began', 'begin', 'being', 'below', 'better', 'between', 'black', 'bring', 'build',
-  'built', 'called', 'calling', 'cannot', 'carry', 'cause', 'center', 'change', 'check', 'child',
-  'class', 'clear', 'close', 'coming', 'common', 'could', 'course', 'create', 'current', 'default',
-  'doing', 'during', 'early', 'earth', 'email', 'empty', 'enough', 'enter', 'error', 'every',
-  'example', 'exist', 'family', 'field', 'files', 'final', 'first', 'focus', 'follow', 'force',
-  'found', 'frame', 'front', 'fully', 'given', 'giving', 'going', 'great', 'green', 'group',
-  'hands', 'happy', 'having', 'heard', 'heart', 'heavy', 'hello', 'helps', 'hence', 'history',
-  'hours', 'house', 'human', 'image', 'index', 'input', 'inside', 'issue', 'items', 'keeps',
-  'known', 'label', 'large', 'later', 'learn', 'least', 'leave', 'level', 'light', 'limit',
-  'lines', 'links', 'lists', 'little', 'local', 'logic', 'longer', 'looking', 'lower', 'major',
-  'makes', 'making', 'match', 'matter', 'maybe', 'means', 'media', 'merge', 'might', 'minor',
-  'model', 'money', 'month', 'morning', 'mouse', 'moved', 'moving', 'music', 'named', 'names',
-  'needs', 'never', 'newer', 'night', 'noise', 'normal', 'north', 'notes', 'nothing', 'number',
-  'often', 'older', 'opens', 'order', 'other', 'output', 'owner', 'pages', 'panel', 'paper',
-  'parts', 'party', 'paste', 'patch', 'paths', 'pause', 'peace', 'people', 'phase', 'phone',
-  'photo', 'piece', 'place', 'plain', 'plans', 'plate', 'plays', 'please', 'point', 'power',
-  'press', 'price', 'print', 'prior', 'process', 'project', 'prompt', 'public', 'pulse', 'query',
-  'quick', 'quiet', 'quite', 'radio', 'raise', 'range', 'rapid', 'ratio', 'reach', 'reads',
-  'ready', 'really', 'reason', 'record', 'render', 'reply', 'report', 'reset', 'result', 'return',
-  'review', 'right', 'river', 'rough', 'round', 'route', 'rules', 'running', 'saved', 'saving',
-  'scale', 'scene', 'scope', 'score', 'screen', 'script', 'search', 'second', 'section', 'seems',
-  'select', 'sense', 'serve', 'server', 'setup', 'seven', 'shall', 'shape', 'share', 'sharp',
-  'sheet', 'shell', 'shift', 'shine', 'short', 'should', 'shown', 'shows', 'sides', 'sight',
-  'signal', 'silent', 'simple', 'since', 'single', 'sites', 'sized', 'sizes', 'skill', 'sleep',
-  'slice', 'slide', 'small', 'smart', 'smile', 'smoke', 'smooth', 'solid', 'solve', 'something',
-  'sorry', 'sound', 'source', 'south', 'space', 'speak', 'speed', 'spend', 'spent', 'split',
-  'spoken', 'sport', 'stack', 'staff', 'stage', 'stand', 'start', 'state', 'status', 'stays',
-  'steam', 'steel', 'steps', 'stick', 'still', 'stock', 'stone', 'stood', 'stops', 'store',
-  'storm', 'story', 'strip', 'strong', 'stuck', 'study', 'stuff', 'style', 'sugar', 'suite',
-  'super', 'supply', 'surely', 'sweet', 'swift', 'swing', 'switch', 'system', 'table', 'taken',
-  'takes', 'taking', 'talks', 'target', 'tasks', 'taste', 'teach', 'teams', 'terms', 'tests',
-  'thank', 'their', 'theme', 'there', 'these', 'thick', 'thing', 'think', 'third', 'those',
-  'three', 'throw', 'tight', 'timed', 'timer', 'times', 'title', 'today', 'token', 'tones',
-  'tools', 'topic', 'total', 'touch', 'tough', 'tower', 'trace', 'track', 'trade', 'train',
-  'trash', 'treat', 'trees', 'trend', 'trial', 'trick', 'tried', 'tries', 'truck', 'truly',
-  'trust', 'truth', 'trying', 'turns', 'twice', 'typed', 'types', 'under', 'union', 'units',
-  'unity', 'until', 'upper', 'urban', 'usage', 'users', 'using', 'usual', 'valid', 'value',
-  'video', 'views', 'virus', 'visit', 'vital', 'voice', 'votes', 'waits', 'walks', 'walls',
-  'wants', 'watch', 'water', 'waves', 'weeks', 'weigh', 'weird', 'where', 'which', 'while',
-  'white', 'whole', 'whose', 'wider', 'width', 'winds', 'window', 'wings', 'wires', 'woman',
-  'women', 'words', 'works', 'world', 'worry', 'worse', 'worst', 'worth', 'would', 'wound',
-  'write', 'wrong', 'wrote', 'years', 'yield', 'young', 'yours', 'youth',
+const EXTRA_COMMON_SINGLE_WORDS = new Set([
+  'newer', 'opens', 'older', 'sized', 'sizes', 'stays', 'timed', 'typed', 'waits', 'wider',
+  'winds', 'wings', 'wires', 'pulse', 'snot', 'snout', 'sonata', 'senator',
 ]);
+
+function isCommonEnglishWord(rawWord: string): boolean {
+  const lower = rawWord.toLowerCase();
+  if (!lower) return false;
+  if (COMMON_ENGLISH_WORDS.has(lower) || EXTRA_COMMON_SINGLE_WORDS.has(lower)) {
+    return true;
+  }
+
+  // Handle hyphenated common compounds (e.g. "sort-of", "well-known") after exact-match check
+  if (lower.includes('-')) {
+    const parts = lower.split('-').filter(Boolean);
+    if (parts.length >= 2 && parts.every((part) => isCommonEnglishWord(part))) {
+      return true;
+    }
+  }
+
+  // Handle regular English inflections (-s, -es, -ed, -ing, -er, -est, -ly) of common words
+  if (lower.length >= 5) {
+    if (
+      lower.endsWith('s') &&
+      !lower.endsWith('ss') &&
+      COMMON_ENGLISH_WORDS.has(lower.slice(0, -1))
+    ) {
+      return true;
+    }
+    if (lower.endsWith('es') && COMMON_ENGLISH_WORDS.has(lower.slice(0, -2))) {
+      return true;
+    }
+    if (
+      lower.endsWith('ed') &&
+      (COMMON_ENGLISH_WORDS.has(lower.slice(0, -2)) ||
+        COMMON_ENGLISH_WORDS.has(lower.slice(0, -1)))
+    ) {
+      return true;
+    }
+    if (
+      lower.endsWith('ing') &&
+      (COMMON_ENGLISH_WORDS.has(lower.slice(0, -3)) ||
+        COMMON_ENGLISH_WORDS.has(`${lower.slice(0, -3)}e`))
+    ) {
+      return true;
+    }
+    if (
+      lower.endsWith('er') &&
+      (COMMON_ENGLISH_WORDS.has(lower.slice(0, -2)) ||
+        COMMON_ENGLISH_WORDS.has(lower.slice(0, -1)))
+    ) {
+      return true;
+    }
+    if (
+      lower.endsWith('est') &&
+      (COMMON_ENGLISH_WORDS.has(lower.slice(0, -3)) ||
+        COMMON_ENGLISH_WORDS.has(lower.slice(0, -2)))
+    ) {
+      return true;
+    }
+    if (lower.endsWith('ly') && COMMON_ENGLISH_WORDS.has(lower.slice(0, -2))) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 interface PhoneticTarget {
   id?: string;
@@ -333,6 +356,16 @@ const FUNCTION_LEAD_WORDS = new Set([
   'we', 'were', 'what', 'when', 'who', 'will', 'with', 'you', 'your',
 ]);
 
+const FUNCTION_TRAIL_WORDS = new Set([
+  'a', 'about', 'after', 'all', 'also', 'an', 'and', 'any', 'are', 'as', 'at', 'back', 'be',
+  'before', 'but', 'by', 'can', 'could', 'did', 'do', 'down', 'for', 'from', 'had', 'has',
+  'have', 'he', 'her', 'here', 'him', 'his', 'how', 'i', 'if', 'in', 'into', 'is', 'it', 'its',
+  'just', 'me', 'more', 'most', 'my', 'no', 'not', 'now', 'of', 'off', 'on', 'one', 'only',
+  'onto', 'or', 'our', 'out', 'over', 'she', 'should', 'so', 'some', 'than', 'that', 'the',
+  'their', 'them', 'then', 'there', 'they', 'this', 'to', 'too', 'under', 'up', 'us', 'very',
+  'was', 'we', 'were', 'what', 'when', 'who', 'why', 'will', 'with', 'would', 'you', 'your',
+]);
+
 function scorePhoneticMatch(
   spanWords: string[],
   target: PhoneticTarget
@@ -350,15 +383,21 @@ function scorePhoneticMatch(
   }
 
   // Reject single common English words from fuzzy replacement unless exact normalized match
-  if (spanWords.length === 1 && COMMON_SINGLE_WORDS.has(spanWords[0].toLowerCase())) {
+  if (spanWords.length === 1 && isCommonEnglishWord(spanWords[0])) {
     return 0;
   }
 
-  // Never let a 2-word span start with a common function/greeting word unless the target itself starts with it
+  // Never let a 2-word span start or end with a common function/greeting word unless the target itself matches that edge word
   if (spanWords.length >= 2) {
+    const targetParts = target.replacement.split(/[\s-]+/).filter(Boolean);
     const leadLower = spanWords[0].toLowerCase();
-    const targetLead = target.replacement.split(/[\s-]+/)[0]?.toLowerCase() ?? '';
+    const targetLead = targetParts[0]?.toLowerCase() ?? '';
     if (FUNCTION_LEAD_WORDS.has(leadLower) && leadLower !== targetLead) {
+      return 0;
+    }
+    const trailLower = spanWords[spanWords.length - 1].toLowerCase();
+    const targetTrail = targetParts[targetParts.length - 1]?.toLowerCase() ?? '';
+    if (FUNCTION_TRAIL_WORDS.has(trailLower) && trailLower !== targetTrail) {
       return 0;
     }
   }

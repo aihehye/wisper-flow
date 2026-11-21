@@ -31,6 +31,7 @@ function computeStreakDays(dayKeys: Set<string>, now: Date): number {
 }
 
 export function computeUsageStats(history: HistoryEntry[]): UsageStats {
+  const dictations = history.filter((entry) => entry.mode !== 'typo-fix');
   const now = new Date();
   const todayKey = toLocalDateKey(now);
   const activeDays = new Set<string>();
@@ -40,7 +41,7 @@ export function computeUsageStats(history: HistoryEntry[]): UsageStats {
   let totalSpeechSec = 0;
   let todayWords = 0;
 
-  for (const entry of history) {
+  for (const entry of dictations) {
     const words = Math.max(0, entry.numWords);
     totalWords += words;
     totalDurationSec += Math.max(0, entry.durationSec);
@@ -56,7 +57,7 @@ export function computeUsageStats(history: HistoryEntry[]): UsageStats {
     }
   }
 
-  const totalDictations = history.length;
+  const totalDictations = dictations.length;
   const averageWpm =
     totalSpeechSec > 0 ? Math.round(totalWords / (totalSpeechSec / 60)) : 0;
   const timeSavedMinutes = Math.max(
@@ -117,6 +118,7 @@ function resolveEntryTokens(entry: HistoryEntry): {
 }
 
 export function getTokenUsageStats(history: HistoryEntry[]): TokenUsageStats {
+  const dictations = history.filter((entry) => entry.mode !== 'typo-fix');
   const now = new Date();
   const todayKey = toLocalDateKey(now);
 
@@ -141,14 +143,14 @@ export function getTokenUsageStats(history: HistoryEntry[]): TokenUsageStats {
     totalTokens: 0,
     promptTokens: 0,
     completionTokens: 0,
-    dictations: history.length,
+    dictations: dictations.length,
     measuredDictations: 0,
   };
   const today = { totalTokens: 0, promptTokens: 0, completionTokens: 0, dictations: 0 };
   const last7Days = { totalTokens: 0, promptTokens: 0, completionTokens: 0, dictations: 0 };
   const appMap = new Map<string, { totalTokens: number; dictations: number }>();
 
-  const sortedHistory = [...history].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  const sortedHistory = [...dictations].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   const recent: TokenUsageStats['recent'] = [];
 
   for (const entry of sortedHistory) {

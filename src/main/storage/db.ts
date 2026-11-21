@@ -80,6 +80,8 @@ interface HistoryRow {
   tokens_estimated: number;
   audio_path: string | null;
   corrected_text: string | null;
+  mode: string;
+  model_used: string | null;
 }
 
 function mapDictionaryRow(row: DictionaryRow): DictionaryEntry {
@@ -155,6 +157,8 @@ function mapHistoryRow(row: HistoryRow): HistoryEntry {
     tokensEstimated: Boolean(row.tokens_estimated),
     audioPath: row.audio_path ?? null,
     correctedText: row.corrected_text ?? null,
+    mode: row.mode === 'typo-fix' ? 'typo-fix' : 'dictation',
+    modelUsed: row.model_used ?? null,
   };
 }
 
@@ -287,6 +291,7 @@ export class AppDatabase {
 
     this.migrateHistoryTokenColumns();
     this.migrateHistoryCorpusColumns();
+    this.migrateHistoryModeColumns();
   }
 
   private migrateHistoryTokenColumns(): void {
@@ -311,6 +316,20 @@ export class AppDatabase {
     const additions: Array<[string, string]> = [
       ['audio_path', 'TEXT'],
       ['corrected_text', 'TEXT'],
+    ];
+    for (const [col, def] of additions) {
+      if (!existing.has(col)) {
+        this.db.exec(`ALTER TABLE history ADD COLUMN ${col} ${def}`);
+      }
+    }
+  }
+
+  private migrateHistoryModeColumns(): void {
+    const cols = this.db.prepare('PRAGMA table_info(history)').all() as Array<{ name: string }>;
+    const existing = new Set(cols.map((c) => c.name));
+    const additions: Array<[string, string]> = [
+      ['mode', "TEXT NOT NULL DEFAULT 'dictation'"],
+      ['model_used', 'TEXT'],
     ];
     for (const [col, def] of additions) {
       if (!existing.has(col)) {
@@ -736,8 +755,8 @@ export class AppDatabase {
           app_name, window_title, duration_sec, speech_duration_sec,
           num_words, e2e_latency_ms, language, mic_device, archived,
           prompt_tokens, completion_tokens, total_tokens, tokens_estimated,
-          audio_path, corrected_text
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          audio_path, corrected_text, mode, model_used
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -759,7 +778,9 @@ export class AppDatabase {
         Math.max(0, Math.round(entry.totalTokens ?? 0)),
         entry.tokensEstimated ? 1 : 0,
         entry.audioPath ?? null,
-        entry.correctedText ?? null
+        entry.correctedText ?? null,
+        entry.mode === 'typo-fix' ? 'typo-fix' : 'dictation',
+        entry.modelUsed ?? null
       );
 
     const saved = this.db

@@ -8,6 +8,7 @@ import {
   Copy,
   Flame,
   Gauge,
+  Keyboard,
   Mic,
   Pencil,
   Search,
@@ -389,6 +390,7 @@ export const HomePage: React.FC<HomePageProps> = ({
         <div className="list-stack">
           {entries.map((entry) => {
             const finalText = entry.pastedText || entry.formattedText || entry.asrText;
+            const isTypoFix = entry.mode === 'typo-fix';
             const hasRawDiff =
               entry.asrText.trim().length > 0 &&
               entry.asrText.trim() !== finalText.trim();
@@ -399,9 +401,22 @@ export const HomePage: React.FC<HomePageProps> = ({
                 <div className="history-meta">
                   <div className="history-meta-left">
                     <span>{formatTimestamp(entry.timestamp)}</span>
+                    {isTypoFix && (
+                      <span
+                        className="chip accent"
+                        title={`Keyboard typo fix (${settings.shortcuts.fixInputHotkey || 'Alt+F'})`}
+                      >
+                        <Keyboard size={12} />
+                        <span>Typo Fix</span>
+                      </span>
+                    )}
                     <span className="chip">{entry.appName || 'Active window'}</span>
-                    <span>{entry.durationSec.toFixed(1)}s</span>
-                    <span>{Math.round(entry.e2eLatencyMs)}ms</span>
+                    {!isTypoFix && <span>{entry.durationSec.toFixed(1)}s</span>}
+                    <span>
+                      {isTypoFix && entry.e2eLatencyMs < 1
+                        ? '<1ms'
+                        : `${Math.round(entry.e2eLatencyMs)}ms`}
+                    </span>
                   </div>
 
                   <div className="history-actions">
@@ -433,7 +448,7 @@ export const HomePage: React.FC<HomePageProps> = ({
                           }))
                         }
                       >
-                        <span>Raw ASR</span>
+                        <span>{isTypoFix ? 'Original' : 'Raw ASR'}</span>
                         {isExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
                       </button>
                     )}
@@ -474,7 +489,7 @@ export const HomePage: React.FC<HomePageProps> = ({
 
                 {hasRawDiff && isExpanded && (
                   <div className="raw-diff-box">
-                    <strong>Raw ASR:</strong> {entry.asrText}
+                    <strong>{isTypoFix ? 'Original typed:' : 'Raw ASR:'}</strong> {entry.asrText}
                   </div>
                 )}
 

@@ -118,6 +118,8 @@ export interface RegexRuleEntry {
   modifiedAt: string;
 }
 
+export type HistoryMode = 'dictation' | 'typo-fix';
+
 export interface HistoryEntry {
   id: string;
   timestamp: string;
@@ -139,6 +141,8 @@ export interface HistoryEntry {
   tokensEstimated?: boolean;
   audioPath?: string | null;
   correctedText?: string | null;
+  mode?: HistoryMode;
+  modelUsed?: string | null;
 }
 
 export interface CorpusStats {

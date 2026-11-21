@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 // @ts-ignore Node --experimental-strip-types requires explicit .ts extension
 import { AppDatabase } from '../src/main/storage/db.ts';
 // @ts-ignore Node --experimental-strip-types requires explicit .ts extension
-import { computeUsageStats } from '../src/main/storage/stats.ts';
+import { computeUsageStats, getTokenUsageStats } from '../src/main/storage/stats.ts';
 // @ts-ignore Node --experimental-strip-types requires explicit .ts extension
 import { buildDictionaryContextHints, DictationStateMachine, extractWindowContextTokens, isDictionaryHintEcho } from '../src/main/stateMachine.ts';
 import type { AsrBackend, TranscribeRequest, TranscribeResult } from '../src/main/asr/types';
@@ -34,6 +34,7 @@ function createHarness(opts?: {
   pasteOk?: boolean;
   asrText?: string;
   asrError?: Error;
+  selectAllResult?: { ok: boolean; text?: string; previousClipboard?: string; error?: string };
 }) {
   const { dir, dbPath } = createTempDbPath();
   const db = new AppDatabase(dbPath, 'win32');
@@ -81,6 +82,13 @@ function createHarness(opts?: {
       copyCalls.push(text);
       return { ok: true };
     },
+    ...(opts?.selectAllResult
+      ? {
+          async selectAllAndCopy() {
+            return opts.selectAllResult!;
+          },
+        }
+      : {}),
     async muteOtherAudio(excludePids) {
       muteCalls.push(excludePids);
     },
@@ -404,6 +412,72 @@ describe('DictationStateMachine', () => {
 
       await h.sm.handleCopyLast();
       assert.deepEqual(h.copyCalls, ['Test fallback text', 'Test fallback text']);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it('logs Alt+F keyboard typo fixes into history with mode typo-fix and notifies hub without skewing voice stats', async () => {
+    const h = createHarness({
+      foregroundApp: {
+        processName: 'Antigravity.exe',
+        title: 'wisper-flow - Antigravity',
+        isTerminal: false,
+      },
+      selectAllResult: {
+        ok: true,
+        text: 'i snet teh msg becuase i want to explsin htat',
+        previousClipboard: 'keep-me',
+      },
+    });
+
+    try {
+      await h.sm.handleFixInputBox();
+
+      assert.equal(h.pasteCalls.length, 1);
+      assert.equal(h.pasteCalls[0].text, 'I sent the msg because I want to explain that');
+
+      const history = h.db.listHistory();
+      assert.equal(history.length, 1);
+      assert.equal(history[0].asrText, 'i snet teh msg becuase i want to explsin htat');
+      assert.equal(history[0].pastedText, 'I sent the msg because I want to explain that');
+      assert.equal(history[0].mode, 'typo-fix');
+      assert.equal(history[0].modelUsed, 'typo-fixer');
+      assert.equal(history[0].appName, 'Antigravity.exe');
+      assert.equal(history[0].windowTitle, 'wisper-flow - Antigravity');
+      assert.equal(history[0].language, 'English');
+      assert.equal(history[0].durationSec, 0);
+      assert.ok(history[0].e2eLatencyMs >= 0 && history[0].e2eLatencyMs < 100);
+      assert.equal(h.historyAdded.length, 1);
+      assert.equal(h.historyAdded[0].id, history[0].id);
+
+      // Typo-fix entries must not distort voice dictation WPM / dictation / token counters
+      const usageStats = computeUsageStats(history);
+      assert.equal(usageStats.totalDictations, 0);
+      assert.equal(usageStats.totalWords, 0);
+      const tokenStats = getTokenUsageStats(history);
+      assert.equal(tokenStats.allTime.dictations, 0);
+      assert.equal(tokenStats.allTime.totalTokens, 0);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it('does not log history when Alt+F finds no typos to change', async () => {
+    const h = createHarness({
+      selectAllResult: {
+        ok: true,
+        text: 'Already clean sentence.',
+        previousClipboard: 'orig-clip',
+      },
+    });
+
+    try {
+      await h.sm.handleFixInputBox();
+      assert.equal(h.pasteCalls.length, 0);
+      assert.equal(h.db.listHistory().length, 0);
+      assert.equal(h.historyAdded.length, 0);
+      assert.deepEqual(h.copyCalls, ['orig-clip']);
     } finally {
       h.cleanup();
     }

@@ -323,4 +323,51 @@ describe('runTextPipeline', () => {
       'Check the table and label in the normal system report.'
     );
   });
+
+  it('never lets phonetic fuzzy matching overwrite valid common English words like sent, sort, or sound', () => {
+    const dictionary = [
+      makeDict('d1', 'maniteja', 'Maniteja'),
+      makeDict('d2', 'omarchy', 'Omarchy'),
+      makeDict('d3', 'sonnet', 'Sonnet'),
+      makeDict('d4', 'haiku', 'Haiku'),
+      makeDict('d5', 'flash', 'Flash'),
+      makeDict('d6', 'neon', 'Neon'),
+      makeDict('d7', 'regex', 'regex'),
+      makeDict('d8', 'wisper flow', 'Wisper Flow'),
+    ];
+
+    const runPhonetic = (text: string, contextTerms?: string[]) =>
+      runTextPipeline(text, {
+        dictionary,
+        snippets: [],
+        regexRules: [],
+        cleanup: makeCleanup(),
+        contextTerms,
+      }).finalOutput;
+
+    assert.equal(
+      runPhonetic('I just sent it, it sort of works, sound is good'),
+      'I just sent it, it sort of works, sound is good'
+    );
+    assert.equal(
+      runPhonetic(
+        'Send the saint to sand the rock, tried class with the boss at noon, fast code flow in last chat post.',
+        ['Antigravity', 'Neon', 'Sonnet', 'Flash']
+      ),
+      'Send the saint to sand the rock, tried class with the boss at noon, fast code flow in last chat post.'
+    );
+    // Standalone common words must not fuzzily turn into Haiku/regex/Flash
+    assert.equal(
+      runPhonetic('The high shelf holds a cube while the tree needs checks and flush works.'),
+      'The high shelf holds a cube while the tree needs checks and flush works.'
+    );
+    // Non-English mishearings still snap cleanly
+    assert.equal(
+      runPhonetic('Ask Stoornet, manitija, Mantheja, and Oomachi on Antigravty with Neonn.', [
+        'Antigravity',
+        'Neon',
+      ]),
+      'Ask Sonnet, Maniteja, Maniteja, and Omarchy on Antigravity with Neon.'
+    );
+  });
 });

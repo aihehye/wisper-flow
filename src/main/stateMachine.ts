@@ -693,6 +693,7 @@ export class DictationStateMachine {
       completionTokens: asrUsage?.completionTokens ?? 0,
       totalTokens: asrUsage?.totalTokens ?? 0,
       tokensEstimated: asrUsage?.estimated ?? false,
+      mode: 'dictation',
     });
     this.deps.onHistoryAdded(historyEntry);
     if (payload.opusBuffer && payload.opusBuffer.length > 0 && this.deps.corpusStore) {
@@ -840,7 +841,9 @@ export class DictationStateMachine {
     }
 
     const dictionary = this.deps.db.listDictionary();
+    const fixStart = performance.now();
     const fixed = fixKeyboardTypos(copied.text, dictionary);
+    const fixDurationMs = Math.max(0, Math.round(performance.now() - fixStart));
 
     if (fixed === copied.text) {
       if (typeof copied.previousClipboard === 'string') {
@@ -868,6 +871,30 @@ export class DictationStateMachine {
         }
       }, 240);
     }
+
+    const numWords = fixed.trim().split(/\s+/).filter(Boolean).length;
+    const historyEntry = this.deps.db.addHistory({
+      timestamp: new Date().toISOString(),
+      asrText: copied.text,
+      formattedText: fixed,
+      pastedText: fixed,
+      appName: app.processName,
+      windowTitle: app.title,
+      durationSec: 0,
+      speechDurationSec: 0,
+      numWords,
+      e2eLatencyMs: fixDurationMs,
+      language: 'English',
+      micDevice: 'keyboard',
+      archived: false,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      tokensEstimated: false,
+      mode: 'typo-fix',
+      modelUsed: 'typo-fixer',
+    });
+    this.deps.onHistoryAdded(historyEntry);
 
     if (pasteResult.ok) {
       this.deps.playSound('paste');

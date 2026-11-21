@@ -317,6 +317,10 @@ froze frozen hid hidden lit rode ridden rang rung rose risen sang sung sank sunk
 swam swum swore sworn tore torn woke woken
 setup grep rg diff stdin stdout stderr stdio curl wget chmod chown sudo env init lint typecheck
 vite esbuild npm npx pnpm yarn node bun deno daemon systemd
+saint saints boss bosses cube cubes noon scent senate flush flesh flask mint hint hints font
+belt bolt chart shirt skirt fort alert insert assert revert convert desert snort dart cart
+vent bent dent lent cent cents pint lint tint rant pant aunt haunt vault halt melt jolt volt
+cult tilt quilt guilt flirt curt blurt spurt divert invert exert overt avert
 `;
 
 const PROPER_CASE_DEFAULTS = new Map<string, string>([
@@ -648,6 +652,12 @@ function popcount32(n: number): number {
     }
   }
 })();
+
+/**
+ * Shared read-only vocabulary of common English words used to prevent
+ * phonetic fuzzy matchers from overwriting valid English words.
+ */
+export const COMMON_ENGLISH_WORDS: ReadonlySet<string> = COMMON_WORDS;
 
 // --- QWERTY Distance & Weighted Damerau-Levenshtein ---
 
